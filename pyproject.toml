@@ -31,8 +31,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/SoYuCry/dext"
-Repository = "https://github.com/SoYuCry/dext"
+Homepage = "https://github.com/NovaQuantHub/dext"
+Repository = "https://github.com/NovaQuantHub/dext"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]

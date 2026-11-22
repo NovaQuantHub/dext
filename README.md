@@ -7,11 +7,10 @@
 
   <p><b>Decentralized EXchange Trading Library</b></p>
 
-  [![PyPI](https://img.shields.io/pypi/v/dext)](https://pypi.org/project/dext/)
-  [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://github.com/SoYuCry/dext)
-  [![License](https://img.shields.io/github/license/SoYuCry/dext)](https://github.com/SoYuCry/dext/blob/main/LICENSE)
-  [![GitHub stars](https://img.shields.io/github/stars/SoYuCry/dext?style=social)](https://github.com/SoYuCry/dext/stargazers)
-  [![GitHub issues](https://img.shields.io/github/issues/SoYuCry/dext)](https://github.com/SoYuCry/dext/issues)
+  [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://github.com/NovaQuantHub/dext)
+  [![License](https://img.shields.io/github/license/NovaQuantHub/dext)](https://github.com/NovaQuantHub/dext/blob/main/LICENSE)
+  [![GitHub stars](https://img.shields.io/github/stars/NovaQuantHub/dext?style=social)](https://github.com/NovaQuantHub/dext/stargazers)
+  [![GitHub issues](https://img.shields.io/github/issues/NovaQuantHub/dext)](https://github.com/NovaQuantHub/dext/issues)
 </div>
 
 ---
@@ -30,9 +29,13 @@
 
 ## Installation
 
+Install directly from the NovaQuantHub repository.
+
 ```bash
-pip install dext
+python -m pip install "git+https://github.com/NovaQuantHub/dext.git"
 ```
+
+The `dext` name on PyPI belongs to a different project.
 
 ## Quick Start
 
@@ -144,11 +147,11 @@ dext is built to work well with AI-powered development tools and autonomous trad
 ## Star History
 
 <div align="center">
-  <a href="https://star-history.com/#SoYuCry/dext&Date">
+  <a href="https://star-history.com/#NovaQuantHub/dext&Date">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=SoYuCry/dext&type=Date&theme=dark">
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=SoYuCry/dext&type=Date">
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=SoYuCry/dext&type=Date" width="600">
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=NovaQuantHub/dext&type=Date&theme=dark">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=NovaQuantHub/dext&type=Date">
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=NovaQuantHub/dext&type=Date" width="600">
     </picture>
   </a>
 </div>
