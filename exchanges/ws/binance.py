@@ -5,15 +5,10 @@ import asyncio
 import json
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from uuid import uuid4
 
-import requests
-
-from exchanges.base.utils import async_with_timeout
-from exchanges.proxy_utils import get_proxy_config
-from exchanges.logger import setup_logger
+from exchanges.auth.binance import create_signature
 from .base import WebsocketClient
-
-logger = setup_logger("ws.binance")
 
 
 def _parse_levels(levels: List[List[str]]) -> List[List[float]]:
@@ -193,84 +188,56 @@ class BinanceAggTradeWS(WebsocketClient):
 
 
 class BinanceUserWS(WebsocketClient):
-    """Binance user data stream (orders + balances)."""
+    """Binance Spot orders and balances over the signed WebSocket API."""
 
     def __init__(
         self,
         api_key: str,
         on_event,
         *,
-        rest_base: str = "https://api.binance.com",
-        ws_base: str = "wss://stream.binance.com:9443",
-        keepalive_interval: float = 30 * 60,
-        proxies: Optional[Dict[str, str]] = None,
+        secret: str,
+        ws_api_url: str = "wss://ws-api.binance.com:443/ws-api/v3",
         reconnect_delay: float = 3.0,
     ) -> None:
+        if not api_key or not secret:
+            raise ValueError("Binance user stream requires an API key and HMAC secret")
         self.api_key = api_key
-        self.rest_base = rest_base.rstrip("/")
-        self.ws_base = ws_base.rstrip("/")
-        self.keepalive_interval = keepalive_interval
-        self.session = requests.Session()
-        self.session.headers.update({"X-MBX-APIKEY": api_key})
-        proxy_config = proxies if proxies is not None else get_proxy_config()
-        if proxy_config:
-            self.session.proxies.update(proxy_config)
-
-        self._listen_key: Optional[str] = None
-        self._keepalive_task: Optional[asyncio.Task] = None
-
-        super().__init__(name="binance-user", stream_url="", on_event=on_event, reconnect_delay=reconnect_delay)
-
-    def _create_listen_key(self) -> str:
-        url = f"{self.rest_base}/api/v3/userDataStream"
-        resp = self.session.post(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        listen_key = data.get("listenKey")
-        if not listen_key:
-            raise RuntimeError("missing listenKey")
-        return listen_key
-
-    def _keepalive_listen_key(self, listen_key: str) -> None:
-        url = f"{self.rest_base}/api/v3/userDataStream"
-        resp = self.session.put(url, params={"listenKey": listen_key}, timeout=10)
-        resp.raise_for_status()
-
-    async def get_stream_url(self) -> str:
-        self._listen_key = await async_with_timeout(self._create_listen_key, timeout_sec=10)
-        return f"{self.ws_base}/ws/{self._listen_key}"
-
-    async def on_connect(self, ws) -> None:
-        if not self._listen_key:
-            logger.error("[binance-user] no listenKey available, user stream will not receive keepalive")
-            return
-        self._keepalive_task = asyncio.create_task(self._keepalive_loop(self._listen_key))
-        logger.info("[binance-user] connected with listenKey: %s...", self._listen_key[:8])
+        self.secret = secret
+        self._subscription_id: Optional[int] = None
+        super().__init__(name="binance-user", stream_url=ws_api_url, on_event=on_event, reconnect_delay=reconnect_delay)
 
     async def on_disconnect(self) -> None:
-        if self._keepalive_task:
-            self._keepalive_task.cancel()
-            try:
-                await self._keepalive_task
-            except asyncio.CancelledError:
-                pass
-        self._keepalive_task = None
-
-    async def _keepalive_loop(self, listen_key: str) -> None:
-        while True:
-            await asyncio.sleep(self.keepalive_interval)
-            try:
-                await async_with_timeout(self._keepalive_listen_key, listen_key, timeout_sec=10)
-                logger.debug("[binance-user] listenKey keepalive ok")
-            except Exception as exc:  # noqa
-                logger.warning("[binance-user] listenKey keepalive failed: %s", exc)
+        self._subscription_id = None
 
     async def subscribe(self, ws) -> None:
-        return None
+        request_id = uuid4().hex
+        timestamp = time.time_ns() // 1_000_000
+        params = {
+            "apiKey": self.api_key,
+            "timestamp": timestamp,
+            "signature": create_signature(self.secret, f"apiKey={self.api_key}&timestamp={timestamp}"),
+        }
+        await ws.send(json.dumps({"id": request_id, "method": "userDataStream.subscribe.signature", "params": params}))
+        response = self.decode(await asyncio.wait_for(ws.recv(), timeout=10))
+        if response.get("id") != request_id or response.get("status") != 200:
+            code = (response.get("error") or {}).get("code", response.get("status"))
+            raise ConnectionError(f"Binance user stream subscription failed (code={code})")
+        subscription_id = (response.get("result") or {}).get("subscriptionId")
+        if not isinstance(subscription_id, int):
+            raise ConnectionError("Binance user stream response is missing a subscription ID")
+        self._subscription_id = subscription_id
 
     async def handle_message(self, raw: str, ts_local_ms: int) -> None:
         msg = self.decode(raw)
+        if "event" in msg:
+            if msg.get("subscriptionId") != self._subscription_id:
+                return
+            msg = msg["event"]
         event_type = msg.get("e")
+        if event_type in ("eventStreamTerminated", "listenKeyExpired", "serverShutdown"):
+            raise ConnectionError(f"Binance user stream ended: {event_type}")
+        if event_type is None:
+            return
         base_event: Dict[str, Any] = {
             "exchange": "binance",
             "stream": "user",

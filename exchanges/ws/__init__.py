@@ -125,9 +125,10 @@ def get_user_ws_client(name: str, on_event: Callable[[Dict[str, Any]], Any], **k
 
     if name == "binance":
         api_key = kwargs.pop("api_key", None)
-        if not api_key:
-            raise ValueError("Binance user stream requires api_key")
-        return BinanceUserWS(api_key=api_key, on_event=on_event, **kwargs)
+        secret = kwargs.pop("secret", None)
+        if not api_key or not secret:
+            raise ValueError("Binance user stream requires api_key + secret")
+        return BinanceUserWS(api_key=api_key, secret=secret, on_event=on_event, **kwargs)
 
     if name == "lighter":
         market_index = kwargs.pop("market_index", None)

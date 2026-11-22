@@ -1,5 +1,7 @@
 """Test Binance WS integration with unified architecture."""
 import asyncio
+import hashlib
+import hmac
 import json
 from decimal import Decimal
 
@@ -129,11 +131,22 @@ async def test_binance_user_order_update():
 
     ws_client = BinanceUserWS(
         api_key="test_key",
+        secret="test_secret",
         on_event=mock_on_event,
     )
 
-    mock_ws = MockWebsocket()
-    await ws_client.on_connect(mock_ws)
+    class SubscriptionSocket(MockWebsocket):
+        async def recv(self):
+            request = json.loads(self.sent_messages[-1])
+            assert request["method"] == "userDataStream.subscribe.signature"
+            params = request["params"]
+            assert params["apiKey"] == "test_key"
+            signed = f"apiKey=test_key&timestamp={params['timestamp']}".encode()
+            assert params["signature"] == hmac.new(b"test_secret", signed, hashlib.sha256).hexdigest()
+            return json.dumps({"id": request["id"], "status": 200, "result": {"subscriptionId": 0}})
+
+    mock_ws = SubscriptionSocket()
+    await ws_client.subscribe(mock_ws)
 
     order_msg = json.dumps({
         "e": "executionReport",
@@ -158,7 +171,9 @@ async def test_binance_user_order_update():
         "m": False,
     })
 
-    await ws_client.handle_message(order_msg, ts_local_ms=1705834567895)
+    await ws_client.handle_message(json.dumps({"subscriptionId": 1, "event": json.loads(order_msg)}), 1705834567895)
+    assert events_received == []
+    await ws_client.handle_message(json.dumps({"subscriptionId": 0, "event": json.loads(order_msg)}), 1705834567895)
 
     assert len(events_received) == 1
     raw_event = events_received[0]
@@ -176,3 +191,9 @@ async def test_binance_user_order_update():
     assert normalized.data.filled == Decimal("0.05")
     assert normalized.data.fill_price == Decimal("65000.00")
     assert normalized.metadata.event_type == EventType.FILL_UPDATE
+
+    with pytest.raises(ConnectionError, match="eventStreamTerminated"):
+        await ws_client.handle_message('{"subscriptionId":0,"event":{"e":"eventStreamTerminated"}}', 1705834567896)
+    await ws_client.on_disconnect()
+    await ws_client.subscribe(mock_ws)
+    assert json.loads(mock_ws.sent_messages[0])["id"] != json.loads(mock_ws.sent_messages[1])["id"]

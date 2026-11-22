@@ -192,15 +192,16 @@ await ws.run_forever()
 
 ---
 
-## User Data Stream (ListenKey)
+## User Data Stream
 
-This integration uses the listenKey flow to receive private events via WebSocket.
+The Spot user stream signs `userDataStream.subscribe.signature` with an API key and its HMAC secret. The client authenticates again when it reconnects.
 
 ```python
 from exchanges.ws import BinanceUserWS
 
 ws = BinanceUserWS(
     api_key="your_api_key",
+    secret="your_hmac_secret",
     on_event=on_event,
 )
 await ws.run_forever()
@@ -270,4 +271,4 @@ await ws.run_forever()
 
 - REST API (Spot): `binance-spot-api-docs/rest-api.md`
 - WebSocket Streams: `binance-spot-api-docs/web-socket-streams.md`
-- User Data Stream: Binance Spot user data stream docs (listenKey)
+- [Binance Spot WebSocket API user data stream](https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/ws-api/user-data-stream)

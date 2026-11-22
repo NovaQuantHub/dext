@@ -4,7 +4,7 @@ from ..base.types import Entry
 class BinanceEndpoints:
     """Binance Spot API endpoints.
 
-    API Documentation: https://binance-docs.github.io/apidocs/spot/en/
+    API Documentation: https://developers.binance.com/en/docs/products/spot/rest-api
     Base URL: https://api.binance.com
     """
 
@@ -45,8 +45,3 @@ class BinanceEndpoints:
         self.private_get_api_v3_orderlist = self.privateGetApiV3OrderList = Entry('api/v3/orderList', 'private', 'GET', {'cost': 2})
         self.private_get_api_v3_allorderlist = self.privateGetApiV3AllOrderList = Entry('api/v3/allOrderList', 'private', 'GET', {'cost': 10})
         self.private_get_api_v3_openorderlist = self.privateGetApiV3OpenOrderList = Entry('api/v3/openOrderList', 'private', 'GET', {'cost': 3})
-
-        # User Data Stream
-        self.private_post_api_v3_userdatastream = self.privatePostApiV3UserDataStream = Entry('api/v3/userDataStream', 'private', 'POST', {'cost': 1})
-        self.private_put_api_v3_userdatastream = self.privatePutApiV3UserDataStream = Entry('api/v3/userDataStream', 'private', 'PUT', {'cost': 1})
-        self.private_delete_api_v3_userdatastream = self.privateDeleteApiV3UserDataStream = Entry('api/v3/userDataStream', 'private', 'DELETE', {'cost': 1})
