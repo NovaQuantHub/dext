@@ -10,9 +10,9 @@ class LighterEndpoints:
         self.public_get_orderbooks_market_id_details = self.publicGetOrderbooksMarketIdDetails = Entry('api/v1/orderBookDetails', 'public', 'GET', {'cost': 1})
         self.public_get_markets = self.publicGetMarkets = Entry('api/v1/orderBookDetails', 'public', 'GET', {'cost': 1})
         self.public_get_markets_market_id = self.publicGetMarketsMarketId = Entry('api/v1/orderBookDetails', 'public', 'GET', {'cost': 1})
-        self.public_get_trades = self.publicGetTrades = Entry('api/v1/trades', 'public', 'GET', {'cost': 1})
-        self.public_get_trades_market_id = self.publicGetTradesMarketId = Entry('api/v1/trades', 'public', 'GET', {'cost': 1})
-        self.public_get_candles = self.publicGetCandles = Entry('api/v1/candlesticks', 'public', 'GET', {'cost': 1})
+        self.public_get_trades = self.publicGetTrades = Entry('api/v1/recentTrades', 'public', 'GET', {'cost': 1})
+        self.public_get_trades_market_id = self.publicGetTradesMarketId = self.publicGetTrades
+        self.public_get_candles = self.publicGetCandles = Entry('api/v1/candles', 'public', 'GET', {'cost': 1})
         self.public_get_funding_rates = self.publicGetFundingRates = Entry('api/v1/funding-rates', 'public', 'GET', {'cost': 1})
 
         # Private API endpoints
@@ -20,7 +20,8 @@ class LighterEndpoints:
         self.private_get_accounts_account_index = self.privateGetAccountsAccountIndex = Entry('api/v1/account', 'private', 'GET', {'cost': 1})
         self.private_get_orders = self.privateGetOrders = Entry('api/v1/accountActiveOrders', 'private', 'GET', {'cost': 1})
         self.private_get_orders_active = self.privateGetOrdersActive = Entry('api/v1/accountActiveOrders', 'private', 'GET', {'cost': 1})
-        self.private_get_orders_history = self.privateGetOrdersHistory = Entry('api/v1/orders/history', 'private', 'GET', {'cost': 1})
+        self.private_get_orders_history = self.privateGetOrdersHistory = Entry('api/v1/accountInactiveOrders', 'private', 'GET', {'cost': 1})
+        self.private_get_orders_by_client_index = self.privateGetOrdersByClientIndex = Entry('api/v1/accountOrders', 'private', 'GET', {'cost': 1})
         self.private_get_fills = self.privateGetFills = Entry('api/v1/trades', 'private', 'GET', {'cost': 1})
         self.private_get_positions = self.privateGetPositions = Entry('api/v1/account', 'private', 'GET', {'cost': 1})
 

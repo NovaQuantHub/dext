@@ -13,7 +13,7 @@ API Docs: https://apidocs.lighter.xyz
 import itertools
 import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base.exchange import Exchange
 from .endpoints.lighter import LighterEndpoints
@@ -178,24 +178,12 @@ class lighter(Exchange):
         )
 
     def _get_account_index(self, params: Optional[Dict[str, Any]] = None) -> Optional[int]:
-        params = params or {}
-        value = (
-            params.get("account_index")
-            or params.get("accountIndex")
-            or self.options.get("accountIndex")
-        )
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
+        value = self.safe_value_2(params or {}, "account_index", "accountIndex", self.options.get("accountIndex"))
+        return self._as_int(value)
 
     def _get_api_key_index(self, params: Optional[Dict[str, Any]] = None) -> int:
-        params = params or {}
-        value = params.get("api_key_index") or params.get("apiKeyIndex") or self.options.get("apiKeyIndex", 0)
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
+        value = self.safe_value_2(params or {}, "api_key_index", "apiKeyIndex", self.options.get("apiKeyIndex", 0))
+        return self._as_int(value, 0)
 
     def _ensure_signer_client(self) -> SimpleSignerClient:
         if self._signer is not None:
@@ -248,6 +236,12 @@ class lighter(Exchange):
         except (TypeError, ValueError):
             return default
 
+    def _timestamp_ms(self, value: Any) -> Optional[int]:
+        timestamp = self._as_int(value)
+        if timestamp is None:
+            return None
+        return timestamp * 1000 if abs(timestamp) < 100_000_000_000 else timestamp
+
     def _as_bool(self, value: Any) -> Optional[bool]:
         if isinstance(value, bool):
             return value
@@ -296,12 +290,10 @@ class lighter(Exchange):
         params = params or {}
         base_url = self.urls["api"]["public" if api == "public" else "private"]
         url = base_url + "/" + path
-        headers = headers or {}
+        headers = dict(headers or {})
 
         if api != "public":
-            auth = self._get_auth_token()
-            headers["authorization"] = auth
-            params = self.extend({"auth": auth}, params)
+            headers["Authorization"] = self._get_auth_token()
 
         if method in ("GET", "DELETE"):
             if params:
@@ -360,7 +352,7 @@ class lighter(Exchange):
                 "swap": True,
                 "future": False,
                 "option": False,
-                "active": status.upper() in ("TRADING", "OPEN"),
+                "active": status.upper() in ("ACTIVE", "TRADING", "OPEN"),
                 "contract": True,
                 "linear": True,
                 "inverse": False,
@@ -387,7 +379,8 @@ class lighter(Exchange):
         market = self.market(symbol)
         market_id = market["id"]
 
-        response = self._request(self.endpoints.publicGetOrderbooksMarketIdDetails, params or {})
+        request = self.extend({"market_id": market_id}, params or {})
+        response = self._request(self.endpoints.publicGetOrderbooksMarketIdDetails, request)
         details = self.safe_list(response, "order_book_details", [])
         if not details:
             details = self.safe_list(response, "spot_order_book_details", [])
@@ -428,9 +421,8 @@ class lighter(Exchange):
             or self.safe_string(ticker, "askPrice")
         )
         
-        # Calculate mid price
-        last = None
-        if bid and ask:
+        last = self.safe_string(ticker, "last_trade_price")
+        if last is None and bid and ask:
             last = Precise.string_div(
                 Precise.string_add(bid, ask),
                 "2"
@@ -483,21 +475,15 @@ class lighter(Exchange):
         market = self.market(symbol)
         market_id = market["id"]
 
-        request = {"market_id": market_id}
-        if limit is not None:
-            request["limit"] = max(1, min(int(limit), 100))
+        request = {"market_id": market_id, "limit": 100 if limit is None else max(1, min(int(limit), 100))}
         response = self._request(self.endpoints.publicGetOrderbooksMarketId, self.extend(request, params or {}))
-
-        bids = self.safe_list(response, "bids", [])
-        asks = self.safe_list(response, "asks", [])
-        timestamp = self.milliseconds()
-        return self.parse_order_book(
-            {"bids": bids, "asks": asks},
-            symbol,
-            timestamp,
-            "bids",
-            "asks",
-        )
+        book = {}
+        for side in ("bids", "asks"):
+            book[side] = [
+                [entry.get("price"), entry.get("remaining_base_amount")] if isinstance(entry, dict) else entry
+                for entry in self.safe_list(response, side, [])
+            ]
+        return self.parse_order_book(book, symbol, self.milliseconds())
 
     def _fetch_account_details(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         params = params or {}
@@ -569,14 +555,16 @@ class lighter(Exchange):
             Parsed position dictionary
         """
         market_id = self.safe_string(position, "market_id")
-        symbol = self.safe_symbol(market_id, market)
+        symbol = self.safe_symbol(market_id, market) if market else self.safe_string(position, "symbol", market_id)
         
         position_amt = self.safe_string(position, "position")
         contracts = self.parse_number(position_amt)
         
         side = None
         if contracts is not None:
-            side = "long" if contracts > 0 else "short" if contracts < 0 else None
+            sign = self.safe_integer(position, "sign")
+            if contracts:
+                side = "short" if (sign < 0 if sign else contracts < 0) else "long"
             contracts = abs(contracts)
         
         return {
@@ -585,12 +573,12 @@ class lighter(Exchange):
             "symbol": symbol,
             "contracts": contracts,
             "contractSize": 1,
-            "entryPrice": self.safe_number(position, "avg_price"),
+            "entryPrice": self.safe_number_2(position, "avg_entry_price", "avg_price"),
             "markPrice": None,
-            "notional": None,
+            "notional": self.safe_number(position, "position_value"),
             "leverage": None,
             "unrealizedPnl": self.safe_number(position, "unrealized_pnl"),
-            "liquidationPrice": None,
+            "liquidationPrice": self.safe_number(position, "liquidation_price"),
             "collateral": None,
             "marginMode": "cross",
             "initialMargin": None,
@@ -629,6 +617,18 @@ class lighter(Exchange):
         for order in orders:
             if str(order.get("id")) == str(id) or str(order.get("clientOrderId")) == str(id):
                 return order
+        client_index = self._as_int(id)
+        if client_index is not None and 0 < client_index < 2**63:
+            market = self.market(symbol)
+            request = self.extend(params or {}, {
+                "account_index": self._get_account_index(params),
+                "client_order_indexes": str(client_index),
+            })
+            response = self._request(self.endpoints.privateGetOrdersByClientIndex, request)
+            for order in self.safe_list(response, "orders", []):
+                order_market = self.safe_string_2(order, "market_index", "market_id")
+                if order_market == str(market["id"]):
+                    return self.parse_order(order, market)
         raise OrderNotFound(f"{self.id} order {id} not found")
 
     def fetch_trades(
@@ -636,9 +636,7 @@ class lighter(Exchange):
     ) -> List[Dict[str, Any]]:
         self.load_markets()
         market = self.market(symbol)
-        request = {"market_id": market["id"]}
-        if limit is not None:
-            request["limit"] = max(1, min(int(limit), 100))
+        request = {"market_id": market["id"], "limit": max(1, min(int(limit or 100), 100))}
         response = self._request(self.endpoints.publicGetTrades, self.extend(request, params or {}))
         trades = self.safe_list(response, "trades", response if isinstance(response, list) else [])
         return self.parse_trades(trades, market, since, limit)
@@ -679,7 +677,7 @@ class lighter(Exchange):
         market = self.market(symbol)
         resolution = self.timeframes.get(timeframe, timeframe)
 
-        limit = max(1, int(limit or 100))
+        limit = max(1, min(int(limit or 100), 500))
         now_sec = int(time.time())
         if since is not None:
             start_sec = int(since / 1000)
@@ -696,21 +694,45 @@ class lighter(Exchange):
             "count_back": limit,
         }
         response = self._request(self.endpoints.publicGetCandles, self.extend(request, params or {}))
-        candles = self.safe_list(response, "candlesticks", [])
+        candles = self.safe_list(response, "c")
+        if candles is None:
+            candles = self.safe_list(response, "candlesticks", [])
         return self.parse_ohlcvs(candles, market, timeframe, since, limit)
 
     def parse_ohlcv(self, ohlcv: Dict[str, Any], market: Optional[Dict[str, Any]] = None) -> List[Any]:
-        ts = self.safe_integer(ohlcv, "timestamp")
-        if ts is not None:
-            ts *= 1000
         return [
-            ts,
-            self.safe_number(ohlcv, "open"),
-            self.safe_number(ohlcv, "high"),
-            self.safe_number(ohlcv, "low"),
-            self.safe_number(ohlcv, "close"),
-            self.safe_number(ohlcv, "volume0"),
+            self._timestamp_ms(self.safe_integer_2(ohlcv, "t", "timestamp")),
+            self.safe_number_2(ohlcv, "o", "open"),
+            self.safe_number_2(ohlcv, "h", "high"),
+            self.safe_number_2(ohlcv, "l", "low"),
+            self.safe_number_2(ohlcv, "c", "close"),
+            self.safe_number_2(ohlcv, "v", "volume0", 0.0),
         ]
+
+    def _order_timing(self, order_type: int, params: Dict[str, Any]) -> Tuple[int, int]:
+        time_in_force = self.safe_string_2(params, "timeInForce", "time_in_force", "GTC").upper()
+        ioc = SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL
+        post_only = SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY
+        modes = {
+            "GTC": SimpleSignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            "IOC": ioc,
+            "PO": post_only,
+            "POST_ONLY": post_only,
+        }
+        if time_in_force not in modes:
+            raise InvalidOrder(f"{self.id} does not support timeInForce={time_in_force}")
+        mode = modes[time_in_force]
+        if self._as_bool(self.safe_value_2(params, "postOnly", "post_only")):
+            mode = post_only
+        if order_type == SimpleSignerClient.ORDER_TYPE_MARKET:
+            if mode == post_only:
+                raise InvalidOrder(f"{self.id} market orders cannot be post-only")
+            mode = ioc
+        default_expiry = SimpleSignerClient.DEFAULT_IOC_EXPIRY if mode == ioc else SimpleSignerClient.DEFAULT_28_DAY_ORDER_EXPIRY
+        expiry = self.safe_integer_2(params, "orderExpiry", "order_expiry", default_expiry)
+        if mode == ioc and expiry != SimpleSignerClient.DEFAULT_IOC_EXPIRY:
+            raise InvalidOrder(f"{self.id} IOC orders require orderExpiry=0")
+        return mode, expiry
 
     def create_orders(self, orders: List[Dict[str, Any]], params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         params = params or {}
@@ -723,8 +745,9 @@ class lighter(Exchange):
             if not symbol:
                 continue
             market = self.market(symbol)
-            base_precision = int(market.get("precision", {}).get("amount") or 3)
-            quote_precision = int(market.get("precision", {}).get("price") or 3)
+            precision = self.safe_dict(market, "precision", {})
+            base_precision = self.safe_integer(precision, "amount", 3)
+            quote_precision = self.safe_integer(precision, "price", 3)
 
             order_type_raw = (order.get("type") or "limit").upper()
             order_type_map = {
@@ -761,23 +784,9 @@ class lighter(Exchange):
             if scaled_price is None or scaled_quantity is None:
                 continue
 
-            time_in_force_raw = (order.get("timeInForce") or order.get("time_in_force") or "GTC").upper()
-            post_only = bool(order.get("postOnly") or order.get("post_only"))
-            if post_only:
-                time_in_force = SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY
-            else:
-                tif_map = {
-                    "GTC": SimpleSignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-                    "IOC": SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-                    "FOK": SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-                    "PO": SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
-                    "POST_ONLY": SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
-                }
-                time_in_force = tif_map.get(time_in_force_raw, SimpleSignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME)
-            if order_type == SimpleSignerClient.ORDER_TYPE_MARKET:
-                time_in_force = SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL
+            time_in_force, order_expiry = self._order_timing(order_type, self.extend(params, order))
 
-            reduce_only = bool(order.get("reduceOnly") or order.get("reduce_only"))
+            reduce_only = self._as_bool(self.safe_value_2(order, "reduceOnly", "reduce_only")) is True
             trigger_raw = order.get("triggerPrice") or order.get("trigger_price")
             if trigger_raw is None:
                 scaled_trigger_price = SimpleSignerClient.NIL_TRIGGER_PRICE
@@ -785,14 +794,6 @@ class lighter(Exchange):
                 scaled_trigger_price = self._scale_to_int(trigger_raw, quote_precision)
                 if scaled_trigger_price is None:
                     continue
-
-            expiry_raw = order.get("orderExpiry") or order.get("order_expiry")
-            default_expiry = (
-                SimpleSignerClient.DEFAULT_IOC_EXPIRY
-                if order_type == SimpleSignerClient.ORDER_TYPE_MARKET
-                else SimpleSignerClient.DEFAULT_28_DAY_ORDER_EXPIRY
-            )
-            order_expiry = self._as_int(expiry_raw, default=default_expiry)
 
             client_order_raw = (
                 order.get("clientOrderIndex")
@@ -851,8 +852,9 @@ class lighter(Exchange):
         self.load_markets()
         market = self.market(symbol)
 
-        base_precision = int(market.get("precision", {}).get("amount") or 3)
-        quote_precision = int(market.get("precision", {}).get("price") or 3)
+        precision = self.safe_dict(market, "precision", {})
+        base_precision = self.safe_integer(precision, "amount", 3)
+        quote_precision = self.safe_integer(precision, "price", 3)
 
         order_type_raw = (type or "limit").upper()
         order_type_map = {
@@ -886,23 +888,9 @@ class lighter(Exchange):
         if scaled_price is None or scaled_quantity is None:
             raise InvalidOrder(f"{self.id} invalid price/amount for order")
 
-        time_in_force_raw = (params.get("timeInForce") or params.get("time_in_force") or "GTC").upper()
-        post_only = bool(params.get("postOnly") or params.get("post_only"))
-        if post_only:
-            time_in_force = SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY
-        else:
-            tif_map = {
-                "GTC": SimpleSignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-                "IOC": SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-                "FOK": SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-                "PO": SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
-                "POST_ONLY": SimpleSignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
-            }
-            time_in_force = tif_map.get(time_in_force_raw, SimpleSignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME)
-        if order_type == SimpleSignerClient.ORDER_TYPE_MARKET:
-            time_in_force = SimpleSignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL
+        time_in_force, order_expiry = self._order_timing(order_type, params)
 
-        reduce_only = bool(params.get("reduceOnly") or params.get("reduce_only"))
+        reduce_only = self._as_bool(self.safe_value_2(params, "reduceOnly", "reduce_only")) is True
 
         trigger_raw = params.get("triggerPrice") or params.get("trigger_price")
         if trigger_raw is None:
@@ -911,14 +899,6 @@ class lighter(Exchange):
             scaled_trigger_price = self._scale_to_int(trigger_raw, quote_precision)
             if scaled_trigger_price is None:
                 raise InvalidOrder(f"{self.id} invalid trigger price")
-
-        expiry_raw = params.get("orderExpiry") or params.get("order_expiry")
-        default_expiry = (
-            SimpleSignerClient.DEFAULT_IOC_EXPIRY
-            if order_type == SimpleSignerClient.ORDER_TYPE_MARKET
-            else SimpleSignerClient.DEFAULT_28_DAY_ORDER_EXPIRY
-        )
-        order_expiry = self._as_int(expiry_raw, default=default_expiry)
 
         client_order_raw = params.get("clientOrderIndex") or params.get("clientOrderId") or params.get("client_order_id")
         client_order_index = self._as_int(client_order_raw) or self._next_client_order_index()
@@ -1019,7 +999,11 @@ class lighter(Exchange):
         )
 
     def parse_order(self, order: Dict[str, Any], market: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        normalized = self._normalize_order_record(order, self.safe_symbol(self.safe_string(order, "market_id"), market))
+        market_id = self.safe_string_2(order, "market_index", "market_id")
+        symbol = self.safe_symbol(market_id, market)
+        if market is None:
+            symbol = self.safe_string(order, "market_symbol", symbol)
+        normalized = self._normalize_order_record(order, symbol)
         symbol = normalized.get("symbol")
         status = self.parse_order_status(normalized.get("status"))
         amount = normalized.get("origQty")
@@ -1167,7 +1151,7 @@ class lighter(Exchange):
         }
 
     def _normalize_trade_record(self, trade: Dict[str, Any]) -> Dict[str, Any]:
-        trade_id = trade.get("trade_id") or trade.get("tradeId") or trade.get("id")
+        trade_id = trade.get("trade_id_str") or trade.get("trade_id") or trade.get("tradeId") or trade.get("id")
         size = self.safe_number(trade, "size")
         price = self.safe_number(trade, "price")
         usd_amount = self.safe_number(trade, "usd_amount")
@@ -1216,7 +1200,7 @@ class lighter(Exchange):
                 side = "Bid"
 
         if side is None:
-            side = "Bid"
+            side = "Ask" if maker_is_ask is False else "Bid"
 
         if side == "Bid":
             order_identifier = trade.get("bid_id") or trade.get("order_id")
@@ -1247,7 +1231,7 @@ class lighter(Exchange):
         normalized = self._normalize_trade_record(trade)
         market_id = normalized.get("market_id")
         symbol = self.safe_symbol(market_id, market)
-        timestamp = self._as_int(normalized.get("timestamp"))
+        timestamp = self._timestamp_ms(normalized.get("timestamp"))
         side = normalized.get("side")
         side = "buy" if str(side).lower() in ("bid", "buy") else "sell"
 
@@ -1255,8 +1239,8 @@ class lighter(Exchange):
             "info": trade,
             "id": normalized.get("trade_id"),
             "order": normalized.get("order_id"),
-            "timestamp": timestamp * 1000 if timestamp else None,
-            "datetime": self.iso8601(timestamp * 1000) if timestamp else None,
+            "timestamp": timestamp,
+            "datetime": self.iso8601(timestamp) if timestamp is not None else None,
             "symbol": symbol,
             "type": None,
             "side": side,

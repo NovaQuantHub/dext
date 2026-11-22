@@ -5,10 +5,125 @@ from decimal import Decimal
 
 import pytest
 
+from exchanges.base.errors import InvalidOrder
+from exchanges.lighter import lighter
 from exchanges.ws.dispatcher import create_dispatcher
 from exchanges.ws.lighter import LighterWS
 from exchanges.ws.types import EventType, OrderStatus
 from conftest import MockWebsocket
+
+
+def test_lighter_public_rest_response(monkeypatch):
+    client = lighter()
+    market = {"symbol": "BTC", "market_id": 1, "status": "active", "last_trade_price": 60000.5}
+
+    def request(endpoint, params):
+        if endpoint is client.endpoints.publicGetOrderbooks:
+            return {"order_book_details": [market, {"symbol": "ETH", "market_id": 0, "status": "inactive"}]}
+        if endpoint is client.endpoints.publicGetOrderbooksMarketIdDetails:
+            assert params == {"market_id": "1"}
+            return {"order_book_details": [market]}
+        assert endpoint is client.endpoints.publicGetOrderbooksMarketId
+        assert params == {"market_id": "1", "limit": 100}
+        return {
+            "bids": [{"price": "60000.0", "initial_base_amount": "1.0", "remaining_base_amount": "0.25"}],
+            "asks": [["60001.0", "0.5"]],
+        }
+
+    monkeypatch.setattr(client, "_request", request)
+    markets = client.load_markets()
+    assert markets["BTC"]["active"] is True
+    assert markets["ETH"]["active"] is False
+    assert client.fetch_ticker("BTC")["last"] == 60000.5
+    assert client.fetch_tickers(["BTC"])["BTC"]["last"] == 60000.5
+    book = client.fetch_order_book("BTC")
+    assert book["bids"] == [[60000.0, 0.25]]
+    assert book["asks"] == [[60001.0, 0.5]]
+
+
+def test_lighter_candles_recent_trades_and_short_position(monkeypatch):
+    client = lighter()
+    monkeypatch.setattr(client, "load_markets", lambda: None)
+    monkeypatch.setattr(client, "market", lambda symbol: {"id": "1", "symbol": symbol})
+
+    def request(endpoint, params):
+        if endpoint.path == "api/v1/candles":
+            return {"c": [{"t": 1700000000000, "o": 60500, "h": 61200, "l": 60000, "c": 61000, "v": 3}]}
+        assert endpoint.path == "api/v1/recentTrades"
+        assert params == {"market_id": "1", "limit": 100}
+        return {"trades": [{"trade_id_str": "12", "price": "61000", "size": "1", "timestamp": 1700000000000,
+                            "is_maker_ask": False}]}
+
+    monkeypatch.setattr(client, "_request", request)
+    assert client.fetch_ohlcv("BTC") == [[1700000000000, 60500, 61200, 60000, 61000, 3]]
+    trade, = client.fetch_trades("BTC")
+    assert trade["side"] == "sell"
+    assert trade["timestamp"] == 1700000000000
+    assert trade["id"] == "12"
+    position = client.parse_position({"symbol": "BTC", "market_id": 1, "position": "2", "sign": -1,
+                                      "avg_entry_price": "61100", "liquidation_price": "75000"})
+    assert position["side"] == "short"
+    assert position["contracts"] == 2
+    assert position["entryPrice"] == 61100
+    assert position["liquidationPrice"] == 75000
+
+
+def test_lighter_fetch_order_by_client_index_after_fill(monkeypatch):
+    client = lighter({"options": {"accountIndex": 5}})
+    monkeypatch.setattr(client, "fetch_open_orders", lambda **kwargs: [])
+    monkeypatch.setattr(client, "market", lambda symbol: {"id": "1", "symbol": symbol})
+
+    def request(endpoint, params):
+        assert endpoint.path == "api/v1/accountOrders"
+        assert params == {"account_index": 5, "client_order_indexes": "123"}
+        return {"orders": [{
+            "market_index": 1, "order_id": "1000", "client_order_index": 123,
+            "status": "filled", "price": "61000", "initial_base_amount": "1",
+            "filled_base_amount": "1", "remaining_base_amount": "0", "is_ask": False,
+        }]}
+
+    monkeypatch.setattr(client, "_request", request)
+    order = client.fetch_order("123", "BTC")
+    assert order["id"] == "1000"
+    assert order["clientOrderId"] == "123"
+    assert order["status"] == "closed"
+
+
+def test_lighter_single_and_batch_orders_share_ioc_rules(monkeypatch):
+    client = lighter()
+    market = {"id": "1", "symbol": "BTC", "precision": {"amount": 0, "price": 0}}
+    submitted = []
+
+    class Signer:
+        def create_order(self, **params):
+            submitted.append(params)
+            return {}, {"code": 200}, None
+
+        def create_order_batch(self, orders):
+            submitted.extend(orders)
+            return [{} for _ in orders], {"code": 200}, None
+
+    monkeypatch.setattr(client, "_ensure_signer_client", Signer)
+    monkeypatch.setattr(client, "load_markets", lambda: None)
+    monkeypatch.setattr(client, "market", lambda symbol: market)
+    monkeypatch.setattr(client, "safe_order", lambda order, market: order)
+
+    client.create_order("BTC", "limit", "sell", 3, 60000, {"timeInForce": "IOC", "reduceOnly": "false"})
+    order = {"symbol": "BTC", "type": "limit", "side": "sell", "amount": 3, "price": 60000,
+             "timeInForce": "IOC", "orderExpiry": 0, "reduceOnly": "false"}
+    client.create_orders([order])
+    for signed in submitted:
+        assert signed["time_in_force"] == 0
+        assert signed["order_expiry"] == 0
+        assert signed["base_amount"] == 3
+        assert signed["price"] == 60000
+        assert signed["reduce_only"] is False
+
+    with pytest.raises(InvalidOrder, match="FOK"):
+        client.create_order("BTC", "limit", "sell", 3, 60000, {"timeInForce": "FOK"})
+    with pytest.raises(InvalidOrder, match="FOK"):
+        client.create_orders([order, dict(order, timeInForce="FOK")])
+    assert len(submitted) == 2
 
 
 @pytest.mark.asyncio

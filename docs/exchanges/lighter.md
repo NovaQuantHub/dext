@@ -30,7 +30,6 @@ client = SimpleSignerClient(
     private_key="0xYourPrivateKey",
     account_index=0,
     api_key_index=0,
-    signer_dir="Signer/lighter",  # optional
 )
 
 # Create authentication token (valid for 10 minutes by default)
@@ -38,9 +37,7 @@ auth_token, err = client.create_auth_token_with_expiry()
 ```
 
 ### Requirements
-- **Signer Binary:** Requires `lighter-cpp-signer` library
-  - Download from: [https://github.com/elliottech/lighter-python](https://github.com/elliottech/lighter-python)
-  - Place in `exchanges/signers/` or `Signer/lighter/`
+- The official `lighter-sdk` package supplies the native signer. An explicit `signer_dir` override must contain a binary compatible with the installed SDK. [Lighter SDK releases](https://github.com/elliottech/lighter-python/releases)
 - **Private Key:** zkSync-compatible private key (not API key/secret)
 - **Account Index:** On-chain account index for the wallet
 
@@ -60,10 +57,7 @@ from exchanges import get_client
 
 client = get_client("lighter", {
     "privateKey": "0xYourPrivateKey",
-    "accountIndex": 0,
-    "apiKeyIndex": 0,
-    # optional
-    "signerDir": "Signer/lighter",
+    "options": {"accountIndex": 0, "apiKeyIndex": 3},
 })
 
 # Market data
@@ -81,6 +75,8 @@ balance = client.fetch_balance()
 positions = client.fetch_positions()
 my_trades = client.fetch_my_trades("ETH/USDC", limit=50)
 ```
+
+Orders support `GTC`, `IOC`, and post-only. An IOC order expires immediately (`orderExpiry=0`). The client rejects `FOK` because Lighter has no fill-or-kill mode.
 
 ### Market Index System
 
@@ -323,18 +319,7 @@ ws = LighterWS(
 
 ### 🔧 Signer Library Setup
 
-**Common Issues:**
-1. **Binary not found:**
-   - Error: `Signer library not found`
-   - Solution: Download from official repo, place in `exchanges/signers/`
-
-2. **Platform compatibility:**
-   - Requires platform-specific binary (macOS/Linux/Windows)
-   - Check binary permissions (`chmod +x`)
-
-3. **Path issues:**
-   - Searched paths: `exchanges/signers/`, `Signer/lighter/`
-   - Can specify custom path via `signer_dir` parameter
+The installed SDK selects the binary for the current operating system and architecture. If you supply `signer_dir` directly or `options.signerDir` on the exchange client, use the signer from the same SDK release.
 
 ### ✅ Strengths
 - Native blockchain integration (zkSync)
@@ -347,7 +332,7 @@ ws = LighterWS(
 
 ## Integration Checklist
 
-- [ ] Download and install lighter-cpp-signer binary
+- [ ] Install the project dependencies, including the official Lighter SDK
 - [ ] Configure zkSync private key (not API key/secret)
 - [ ] Set up market index → symbol mapping
 - [ ] Implement auth token refresh (10-minute expiry)

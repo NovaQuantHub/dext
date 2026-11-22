@@ -1,8 +1,4 @@
-"""Lightweight Lighter signer client (no external SDK dependency).
-
-This is a minimal extraction so callers (e.g., demos/tests) can sign and submit
-orders/cancellations without importing example modules or the official SDK.
-"""
+"""Synchronous order client using the native signer distributed with Lighter's SDK."""
 
 from __future__ import annotations
 
@@ -12,7 +8,7 @@ import os
 import platform
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -20,13 +16,6 @@ from exchanges.logger import setup_logger
 
 logger = setup_logger("lighter.signer")
 
-_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_SIGNER_SEARCH_PATHS = [
-    os.path.join(_MODULE_DIR, "signers"),
-    os.path.join(os.path.dirname(_MODULE_DIR), "external", "lighter-python", "lighter", "signers"),
-    os.path.join(os.path.dirname(_MODULE_DIR), "Signer", "Lighter"),
-    os.path.join(os.path.dirname(_MODULE_DIR), "Signer", "lighter"),
-]
 _SIGNER_FILENAMES = {
     ("windows", "amd64"): ["lighter-signer-windows-amd64.dll"],
     ("windows", "x86_64"): ["lighter-signer-windows-amd64.dll"],
@@ -34,17 +23,18 @@ _SIGNER_FILENAMES = {
     ("linux", "amd64"): ["lighter-signer-linux-amd64.so"],
     ("linux", "arm64"): ["lighter-signer-linux-arm64.so"],
     ("linux", "aarch64"): ["lighter-signer-linux-arm64.so"],
+    ("darwin", "x86_64"): ["lighter-signer-darwin-amd64.dylib"],
     ("darwin", "arm64"): ["lighter-signer-darwin-arm64.dylib"],
     ("darwin", "aarch64"): ["lighter-signer-darwin-arm64.dylib"],
 }
 
 
-class StrOrErr(ctypes.Structure):
-    _fields_ = [("str", ctypes.c_char_p), ("err", ctypes.c_char_p)]
-
-
 class SimpleSignerError(Exception):
     """Raised when the native signer cannot be initialised or used."""
+
+
+class _InvalidNonce(SimpleSignerError):
+    """The exchange explicitly rejected a transaction for its nonce."""
 
 
 class SimpleSignerClient:
@@ -99,7 +89,6 @@ class SimpleSignerClient:
         self._market_multipliers: Dict[int, Tuple[int, int]] = {}
 
         self.signer = self._load_library(signer_dir)
-        self._configure_library()
         self._create_client()
 
     # ---- initialisation helpers -------------------------------------------------
@@ -115,93 +104,75 @@ class SimpleSignerClient:
         return cleaned
 
     def _load_library(self, signer_dir: Optional[str]) -> ctypes.CDLL:
-        system = platform.system().lower()
-        arch = platform.machine().lower()
-        filenames = _SIGNER_FILENAMES.get((system, arch))
-        if not filenames:
-            raise SimpleSignerError(f"Unsupported platform/architecture: {system}/{arch}")
+        from lighter import signer_client
 
-        search_paths: List[str] = []
-        if signer_dir:
-            search_paths.append(signer_dir)
-        search_paths.extend(_DEFAULT_SIGNER_SEARCH_PATHS)
+        try:
+            if signer_dir is None:
+                return signer_client.get_signer()
+            system = platform.system().lower()
+            arch = platform.machine().lower()
+            for filename in _SIGNER_FILENAMES.get((system, arch), []):
+                path = os.path.join(signer_dir, filename)
+                if os.path.isfile(path):
+                    signer = ctypes.CDLL(path)
+                    # Explicit overrides must use the same ABI as the pinned SDK.
+                    configure_signer = getattr(signer_client, "__populate_shared_library_functions")
+                    configure_signer(signer)
+                    return signer
+        except (OSError, AttributeError) as exc:
+            raise SimpleSignerError("Unable to load a signer compatible with lighter-sdk 1.1.9") from exc
+        raise SimpleSignerError(f"No Lighter signer for {system}/{arch} in {signer_dir}")
 
-        for candidate_dir in search_paths:
-            if not candidate_dir:
-                continue
-            for filename in filenames:
-                candidate = os.path.join(candidate_dir, filename)
-                if os.path.isfile(candidate):
-                    return ctypes.CDLL(candidate)
-
-        filenames_str = "', '".join(filenames)
-        raise SimpleSignerError(
-            f"Unable to locate signer library. Tried filenames: '{filenames_str}'. "
-            f"Searched in: {search_paths}. Set `signer_dir` or place the library under api/signers/ or Signer/lighter/."
-        )
-
-    def _configure_library(self) -> None:
-        self.signer.CreateClient.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_longlong,
-        ]
-        self.signer.CreateClient.restype = ctypes.c_char_p
-
-        self.signer.CheckClient.argtypes = [ctypes.c_int, ctypes.c_longlong]
-        self.signer.CheckClient.restype = ctypes.c_char_p
-
-        self.signer.CreateAuthToken.argtypes = [
-            ctypes.c_longlong,
-            ctypes.c_int,
-            ctypes.c_longlong,
-        ]
-        self.signer.CreateAuthToken.restype = StrOrErr
-
-        self.signer.SignCreateOrder.argtypes = [
-            ctypes.c_int,
-            ctypes.c_longlong,
-            ctypes.c_longlong,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_longlong,
-            ctypes.c_longlong,
-            ctypes.c_int,
-            ctypes.c_longlong,
-        ]
-        self.signer.SignCreateOrder.restype = StrOrErr
-
-        self.signer.SignCancelOrder.argtypes = [
-            ctypes.c_int,
-            ctypes.c_longlong,
-            ctypes.c_longlong,
-            ctypes.c_int,
-            ctypes.c_longlong,
-        ]
-        self.signer.SignCancelOrder.restype = StrOrErr
+    def _read_native_string(self, pointer: Any) -> Optional[str]:
+        if not pointer:
+            return None
+        try:
+            return ctypes.string_at(pointer).decode("utf-8")
+        finally:
+            self.signer.Free(pointer)
 
     def _create_client(self) -> None:
-        err_ptr = self.signer.CreateClient(
+        error = self._read_native_string(self.signer.CreateClient(
             self.base_url.encode("utf-8"),
             self.private_key.encode("utf-8"),
-            ctypes.c_int(self.chain_id),
-            ctypes.c_int(self.api_key_index),
-            ctypes.c_longlong(self.account_index),
-        )
-        if err_ptr:
-            raise SimpleSignerError(err_ptr.decode("utf-8"))
+            self.chain_id,
+            self.api_key_index,
+            self.account_index,
+        ))
+        if error:
+            raise SimpleSignerError(error)
 
-    # ---- signer primitives ------------------------------------------------------
-    def _decode_str_or_err(self, result: StrOrErr) -> Tuple[Optional[str], Optional[str]]:
-        payload = result.str.decode("utf-8") if result.str else None
-        error = result.err.decode("utf-8") if result.err else None
-        return payload, error
+    def _decode_signed_transaction(self, result) -> Tuple[int, Optional[str], Optional[str]]:
+        error = self._read_native_string(result.err)
+        payload = self._read_native_string(result.txInfo)
+        self._read_native_string(result.txHash)
+        self._read_native_string(result.messageToSign)
+        return result.txType, payload, error
+
+    def _sign_create_order(
+        self,
+        nonce: int,
+        *,
+        market_index: int,
+        client_order_index: int,
+        base_amount: int,
+        price: int,
+        is_ask: bool,
+        order_type: int,
+        time_in_force: int,
+        reduce_only: bool = False,
+        trigger_price: int = NIL_TRIGGER_PRICE,
+        order_expiry: int = DEFAULT_28_DAY_ORDER_EXPIRY,
+    ) -> Tuple[int, Optional[str], Optional[str]]:
+        result = self.signer.SignCreateOrder(
+            market_index, client_order_index, base_amount, price, int(is_ask), order_type, time_in_force,
+            int(reduce_only), trigger_price, order_expiry,
+            0, 0, 0,  # integrator account and fees
+            0, 0,  # self-trade protection settings
+            0,  # enforce the nonce
+            nonce, self.api_key_index, self.account_index,
+        )
+        return self._decode_signed_transaction(result)
 
     def _fetch_nonce(self) -> int:
         url = f"{self.base_url}/api/v1/nextNonce"
@@ -229,44 +200,26 @@ class SimpleSignerClient:
         return self._nonce
 
     def _next_nonce(self) -> int:
-        with self._nonce_lock:
-            if self._nonce is None:
-                self._fetch_nonce()
-            assert self._nonce is not None
-            self._nonce += 1
-            return self._nonce
+        if self._nonce is None:
+            self._fetch_nonce()
+        assert self._nonce is not None
+        self._nonce += 1
+        return self._nonce
 
     def _send_tx(self, tx_type: int, tx_info: str, price_protection: bool = True) -> Dict[str, Any]:
         if not tx_info:
             raise SimpleSignerError("Signer returned empty tx_info payload")
 
-        url = f"{self.base_url}/api/v1/sendTx"
-        files = {
-            "tx_type": (None, str(int(tx_type))),
-            "tx_info": (None, tx_info),
-            "price_protection": (None, "true" if price_protection else "false"),
-        }
-        try:
-            response = self.session.post(url, files=files, timeout=self.timeout, verify=self.verify_ssl)
-        except requests.RequestException as exc:
-            raise SimpleSignerError(f"Failed to submit transaction: {exc}") from exc
+        return self._post_transaction("sendTx", {
+            "tx_type": str(tx_type),
+            "tx_info": tx_info,
+            "price_protection": str(price_protection).lower(),
+        }, self.timeout)
 
-        try:
-            payload = response.json() if response.text else {}
-        except json.JSONDecodeError as exc:
-            raise SimpleSignerError(f"Failed to decode sendTx response: {exc}") from exc
-
-        if response.status_code != 200:
-            message = payload.get("message") or response.text
-            raise SimpleSignerError(f"Transaction rejected ({response.status_code}): {message}")
-        return payload
-
-    def _send_tx_batch(self, tx_list: List[Tuple[int, str]], price_protection: bool = True) -> Dict[str, Any]:
+    def _send_tx_batch(self, tx_list: List[Tuple[int, str]]) -> Dict[str, Any]:
         """Submit a batch of signed transactions."""
         if not tx_list:
             raise SimpleSignerError("Empty transaction list")
-
-        url = f"{self.base_url}/api/v1/sendTxBatch"
 
         tx_types: List[int] = []
         tx_infos: List[str] = []
@@ -277,44 +230,61 @@ class SimpleSignerClient:
             tx_types.append(int(tx_type))
             tx_infos.append(tx_info)
 
-        files = {
-            "tx_types": (None, json.dumps(tx_types)),
-            "tx_infos": (None, json.dumps(tx_infos)),
-            "price_protection": (None, "true" if price_protection else "false"),
-        }
+        return self._post_transaction("sendTxBatch", {
+            "tx_types": json.dumps(tx_types),
+            "tx_infos": json.dumps(tx_infos),
+        }, self.timeout * 2)
 
+    def _post_transaction(self, endpoint: str, form: Dict[str, str], timeout: float) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/v1/{endpoint}"
         try:
-            response = self.session.post(url, files=files, timeout=self.timeout * 2, verify=self.verify_ssl)
+            response = self.session.post(url, data=form, timeout=timeout, verify=self.verify_ssl)
         except requests.RequestException as exc:
-            raise SimpleSignerError(f"Failed to submit batch transaction: {exc}") from exc
+            raise SimpleSignerError(f"{endpoint} submission outcome is unknown ({type(exc).__name__})") from exc
 
         try:
-            payload = response.json() if response.text else {}
-        except json.JSONDecodeError as exc:
-            raise SimpleSignerError(f"Failed to decode sendTxBatch response: {exc}") from exc
+            payload = response.json()
+        except ValueError as exc:
+            raise SimpleSignerError(f"Invalid {endpoint} response (HTTP {response.status_code})") from exc
+        if not isinstance(payload, dict):
+            raise SimpleSignerError(f"Invalid {endpoint} response (HTTP {response.status_code})")
 
-        if response.status_code != 200:
-            message = payload.get("message") or response.text
-            raise SimpleSignerError(f"Batch transaction rejected ({response.status_code}): {message}")
-        return payload
+        code = payload.get("code")
+        if response.status_code == 200 and code == 200:
+            return payload
+        message = str(payload.get("message") or f"HTTP {response.status_code}, code {code}")
+        if response.status_code in (200, 400) and "invalid nonce" in message.lower():
+            raise _InvalidNonce(message)
+        raise SimpleSignerError(f"{endpoint} failed: {message}")
+
+    def _submit_single(
+        self, sign: Callable[[int], Tuple[int, Optional[str], Optional[str]]]
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
+        # Keep nonce allocation, signing, and submission in the same order.
+        with self._nonce_lock:
+            for attempt in range(2):
+                parsed_payload = None
+                try:
+                    tx_type, payload, error = sign(self._next_nonce())
+                    if error or not payload:
+                        raise SimpleSignerError(error or "Signer returned an empty transaction")
+                    parsed_payload = json.loads(payload)
+                    return parsed_payload, self._send_tx(tx_type, payload), None
+                except (SimpleSignerError, ValueError) as exc:
+                    self._nonce = None
+                    if isinstance(exc, _InvalidNonce) and attempt == 0:
+                        continue
+                    return parsed_payload, None, str(exc)
 
     # ---- public API -------------------------------------------------------------
     def check_client(self) -> Optional[str]:
-        result = self.signer.CheckClient(ctypes.c_int(self.api_key_index), ctypes.c_longlong(self.account_index))
-        return result.decode("utf-8") if result else None
+        return self._read_native_string(self.signer.CheckClient(self.api_key_index, self.account_index))
 
     def create_auth_token_with_expiry(self, deadline: int = DEFAULT_10_MIN_AUTH_EXPIRY) -> Tuple[Optional[str], Optional[str]]:
-        actual_deadline = deadline
         if deadline == self.DEFAULT_10_MIN_AUTH_EXPIRY:
-            actual_deadline = int(time.time() + 10 * self.MINUTE)
-        payload, error = self._decode_str_or_err(
-            self.signer.CreateAuthToken(
-                ctypes.c_longlong(actual_deadline),
-                ctypes.c_int(self.api_key_index),
-                ctypes.c_longlong(self.account_index)
-            )
-        )
-        return payload, error
+            deadline = int(time.time() + 10 * self.MINUTE)
+        result = self.signer.CreateAuthToken(deadline, self.api_key_index, self.account_index)
+        return self._read_native_string(result.str), self._read_native_string(result.err)
 
     def create_order(
         self,
@@ -330,44 +300,15 @@ class SimpleSignerClient:
         trigger_price: int = NIL_TRIGGER_PRICE,
         order_expiry: int = DEFAULT_28_DAY_ORDER_EXPIRY,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        for attempt in range(2):
-            nonce = self._next_nonce()
-            payload, error = self._decode_str_or_err(
-                self.signer.SignCreateOrder(
-                    ctypes.c_int(market_index),
-                    ctypes.c_longlong(client_order_index),
-                    ctypes.c_longlong(base_amount),
-                    ctypes.c_int(price),
-                    ctypes.c_int(int(is_ask)),
-                    ctypes.c_int(order_type),
-                    ctypes.c_int(time_in_force),
-                    ctypes.c_int(int(reduce_only)),
-                    ctypes.c_int(trigger_price),
-                    ctypes.c_longlong(order_expiry),
-                    ctypes.c_longlong(nonce),
-                    ctypes.c_int(self.api_key_index),
-                    ctypes.c_longlong(self.account_index),
-                )
+        def sign(nonce):
+            return self._sign_create_order(
+                nonce, market_index=market_index, client_order_index=client_order_index,
+                base_amount=base_amount, price=price, is_ask=is_ask, order_type=order_type,
+                time_in_force=time_in_force, reduce_only=reduce_only, trigger_price=trigger_price,
+                order_expiry=order_expiry,
             )
-            if error:
-                return None, None, error
-            try:
-                parsed_payload = json.loads(payload) if payload else None
-            except json.JSONDecodeError:
-                parsed_payload = {"raw": payload}
 
-            try:
-                response = self._send_tx(self.TX_TYPE_CREATE_ORDER, payload or "")
-                return parsed_payload, response, None
-            except SimpleSignerError as exc:
-                error_msg = str(exc)
-                if "invalid nonce" in error_msg.lower() and attempt == 0:
-                    self._fetch_nonce()
-                    time.sleep(0.1)
-                    continue
-                return parsed_payload, None, error_msg
-
-        return parsed_payload, None, "Unable to submit order after nonce retries"
+        return self._submit_single(sign)
 
     def cancel_order(
         self,
@@ -375,36 +316,11 @@ class SimpleSignerClient:
         market_index: int,
         order_index: int,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
-        for attempt in range(2):
-            nonce = self._next_nonce()
-            payload, error = self._decode_str_or_err(
-                self.signer.SignCancelOrder(
-                    ctypes.c_int(market_index),
-                    ctypes.c_longlong(order_index),
-                    ctypes.c_longlong(nonce),
-                    ctypes.c_int(self.api_key_index),
-                    ctypes.c_longlong(self.account_index),
-                )
-            )
-            if error:
-                return None, None, error
-            try:
-                parsed_payload = json.loads(payload) if payload else None
-            except json.JSONDecodeError:
-                parsed_payload = {"order_index": order_index, "raw": payload}
+        def sign(nonce):
+            result = self.signer.SignCancelOrder(market_index, order_index, 0, nonce, self.api_key_index, self.account_index)
+            return self._decode_signed_transaction(result)
 
-            try:
-                response = self._send_tx(self.TX_TYPE_CANCEL_ORDER, payload or "")
-                return parsed_payload, response, None
-            except SimpleSignerError as exc:
-                error_msg = str(exc)
-                if "invalid nonce" in error_msg.lower() and attempt == 0:
-                    self._fetch_nonce()
-                    time.sleep(0.1)
-                    continue
-                return parsed_payload, None, error_msg
-
-        return parsed_payload, None, "Unable to cancel order after nonce retries"
+        return self._submit_single(sign)
 
     def create_order_batch(
         self,
@@ -417,55 +333,19 @@ class SimpleSignerClient:
         tx_list: List[Tuple[int, str]] = []
         payloads: List[Optional[Dict[str, Any]]] = []
 
-        for attempt in range(2):
-            tx_list.clear()
-            payloads.clear()
-
-            for order in orders:
-                nonce = self._next_nonce()
-
-                payload, error = self._decode_str_or_err(
-                    self.signer.SignCreateOrder(
-                        ctypes.c_int(order.get("market_index")),
-                        ctypes.c_longlong(order.get("client_order_index")),
-                        ctypes.c_longlong(order.get("base_amount")),
-                        ctypes.c_int(order.get("price")),
-                        ctypes.c_int(int(order.get("is_ask"))),
-                        ctypes.c_int(order.get("order_type")),
-                        ctypes.c_int(order.get("time_in_force")),
-                        ctypes.c_int(int(order.get("reduce_only", False))),
-                        ctypes.c_int(order.get("trigger_price", self.NIL_TRIGGER_PRICE)),
-                        ctypes.c_longlong(order.get("order_expiry", self.DEFAULT_28_DAY_ORDER_EXPIRY)),
-                        ctypes.c_longlong(nonce),
-                        ctypes.c_int(self.api_key_index),
-                        ctypes.c_longlong(self.account_index),
-                    )
-                )
-
-                if error:
-                    return payloads, None, error
-
-                try:
-                    parsed_payload = json.loads(payload) if payload else None
-                except json.JSONDecodeError:
-                    parsed_payload = {"raw": payload}
-
-                payloads.append(parsed_payload)
-                tx_list.append((self.TX_TYPE_CREATE_ORDER, payload or ""))
-
+        with self._nonce_lock:
             try:
-                response = self._send_tx_batch(tx_list)
-                return payloads, response, None
-            except SimpleSignerError as exc:
-                message = str(exc)
-                if "invalid nonce" in message.lower() and attempt == 0:
-                    with self._nonce_lock:
-                        self._fetch_nonce()
-                    time.sleep(0.1)
-                    continue
-                return payloads, None, message
-
-        return payloads, None, "Unable to submit batch orders after nonce retries"
+                for order in orders:
+                    params = {key: value for key, value in order.items() if key != "symbol"}
+                    tx_type, payload, error = self._sign_create_order(self._next_nonce(), **params)
+                    if error or not payload:
+                        raise SimpleSignerError(error or "Signer returned an empty transaction")
+                    payloads.append(json.loads(payload))
+                    tx_list.append((tx_type, payload))
+                return payloads, self._send_tx_batch(tx_list), None
+            except (SimpleSignerError, ValueError) as exc:
+                self._nonce = None
+                return payloads, None, str(exc)
 
     # ---- account helpers ------------------------------------------------------
     def fetch_account(self) -> Optional[Dict[str, Any]]:

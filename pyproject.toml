@@ -16,6 +16,7 @@ dependencies = [
     "requests",
     "httpx",
     "eth-account>=0.13.4",
+    "lighter-sdk==1.1.9",
     "curl_cffi",
     "python-dotenv",
     "websockets>=11.0",
