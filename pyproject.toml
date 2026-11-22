@@ -15,6 +15,7 @@ dependencies = [
     "cryptography",
     "requests",
     "httpx",
+    "eth-account>=0.13.4",
     "curl_cffi",
     "python-dotenv",
     "websockets>=11.0",

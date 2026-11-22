@@ -15,6 +15,7 @@ Safe Data Access Pattern
 import hashlib
 from typing import Any, Dict, List, Optional
 
+from .auth.aster import sign_v3_request
 from .base.exchange import Exchange
 from .endpoints.aster import AsterEndpoints
 from .base.errors import (
@@ -50,7 +51,7 @@ class aster(Exchange):
                 "hostname": "asterdex.com",
                 "certified": False,
                 "pro": True,  # WebSocket support via api/ws/aster.py
-                "version": "v1",
+                "version": "v3",
                 "dex": True,  # Aster is a DEX
                 "has": {
                     "CORS": None,
@@ -156,6 +157,7 @@ class aster(Exchange):
                     },
                 },
                 "options": {
+                    "apiVersion": None,
                     "recvWindow": 10 * 1000,  # 10 sec default
                     "defaultTimeInForce": "GTC",  # Good Till Cancel
                     "defaultType": "swap",  # Default market type
@@ -209,7 +211,7 @@ class aster(Exchange):
                     "broad": {
                         # Pattern matching for error messages
                         "has no position": InvalidOrder,
-                        "does not exist": BadSymbol,
+                        "symbol does not exist": BadSymbol,
                         "Invalid symbol": BadSymbol,
                     },
                 },
@@ -229,17 +231,27 @@ class aster(Exchange):
         body: Any = None,
     ) -> Dict[str, Any]:
         params = params or {}
-        # Map 'public' -> 'fapiPublic' and 'private' -> 'fapiPrivate'
-        api_key = "fapiPublic" if api == "public" else "fapiPrivate"
-        base_url = self.urls["api"][api_key]
-        url = base_url + "/" + path
-        query = None
-        headers = headers or {}
+        market_api, version, route = path.split("/", 2)
+        access = "Public" if api == "public" else "Private"
+        base_url = self.urls["api"][market_api + access]
+        futures_version = self.options.get("apiVersion") or ("v1" if self.apiKey and not self.privateKey else "v3")
+        if futures_version not in ("v1", "v3"):
+            raise BadRequest("Aster Futures apiVersion must be v1 or v3")
+        v3 = market_api == "fapi" and futures_version == "v3"
+        url = f"{base_url}/{market_api}/{'v3' if v3 else version}/{route}"
+        headers = dict(headers or {})
 
         if api == "public":
             if params:
                 query = self.urlencode(params)
                 url += "?" + query
+        elif v3:
+            query = sign_v3_request(params, self.privateKey, self.options.get("user"))
+            if method == "GET":
+                url += "?" + query
+            else:
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+                body = query
         else:
             self.check_required_credentials()
             timestamp = self.milliseconds()
@@ -257,6 +269,9 @@ class aster(Exchange):
 
     def fetch_markets(self, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         response = self._request(self.endpoints.publicGetFapiV1ExchangeInfo, params or {})
+        return self._parse_exchange_info(response)
+
+    def _parse_exchange_info(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
         symbols = self.safe_list(response, "symbols", [])
         result = []
         for market in symbols:
@@ -468,6 +483,9 @@ class aster(Exchange):
 
     def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         response = self._request(self.endpoints.privateGetFapiV2Balance, params or {})
+        return self.parse_balance(response)
+
+    def parse_balance(self, response: List[Dict[str, Any]]) -> Dict[str, Any]:
         result: Dict[str, Any] = {"info": response}
         for balance in response:
             code = self.safe_currency_code(self.safe_string(balance, "asset"))
@@ -480,12 +498,9 @@ class aster(Exchange):
         return self.safe_balance(result)
 
     def fetch_positions(self, symbols: Optional[List[str]] = None, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        self.load_markets()
         response = self._request(self.endpoints.privateGetFapiV2PositionRisk, params or {})
-        results = []
-        for position in response:
-            parsed = self.parse_position(position)
-            results.append(parsed)
-        return results if symbols is None else self.filter_by_array_positions(results, "symbol", symbols, False)
+        return self.parse_positions(response, symbols)
 
     def parse_position(self, position: Dict[str, Any], market: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         market_id = self.safe_string(position, "symbol")
@@ -590,19 +605,32 @@ class aster(Exchange):
         price: Optional[float] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        params = params or {}
         self.load_markets()
         market = self.market(symbol)
+        request = self._order_request(market, type, side, amount, price, params or {})
+        response = self._request(self.endpoints.privatePostFapiV1Order, request)
+        return self.parse_order(response, market)
+
+    def _order_request(
+        self,
+        market: Dict[str, Any],
+        type: str,
+        side: str,
+        amount: Optional[float],
+        price: Optional[float],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        order_type = type.upper()
+        symbol = market["symbol"]
         request: Dict[str, Any] = {
             "symbol": market["id"],
             "side": side.upper(),
-            "type": type.upper(),
+            "type": order_type,
         }
-        if type.lower() != "market":
+        if order_type in ("LIMIT", "STOP", "TAKE_PROFIT") and price is not None:
             request["price"] = self.price_to_precision(symbol, price)
-            # For limit orders, timeInForce is mandatory on Aster
-            time_in_force = self.safe_string(params, "timeInForce", "GTC")
-            request["timeInForce"] = time_in_force
+        if order_type == "LIMIT":
+            request["timeInForce"] = self.safe_string(params, "timeInForce", self.options["defaultTimeInForce"])
             params = self.omit(params, "timeInForce")
         if amount is not None:
             request["quantity"] = self.amount_to_precision(symbol, amount)
@@ -610,12 +638,7 @@ class aster(Exchange):
         if client_order_id:
             request["newClientOrderId"] = client_order_id
             params = self.omit(params, "clientOrderId")
-        reduce_only = self.safe_value(params, "reduceOnly")
-        if reduce_only is not None:
-            request["reduceOnly"] = reduce_only
-            params = self.omit(params, "reduceOnly")
-        response = self._request(self.endpoints.privatePostFapiV1Order, self.extend(request, params))
-        return self.parse_order(response, market)
+        return self.extend(request, params)
 
     def cancel_order(
         self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None
@@ -763,8 +786,11 @@ class aster(Exchange):
         code = self.safe_string(response, "code")
         message = self.safe_string(response, "msg") or self.safe_string(response, "message")
 
-        if code is None and message is None:
+        if code in ("0", "200") or (code is None and message is None):
             return  # No error in response
+
+        if message and message.lower() == "no agent found":
+            raise AuthenticationError("Aster V3 agent wallet is not registered for this account")
 
         # Build error feedback message
         feedback = f"{self.id} {self.json(response)}"
@@ -787,52 +813,38 @@ class aster(Exchange):
     # so callers in async contexts don't need asyncio.to_thread().
 
     async def fetch_ticker_async(self, symbol: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        self.load_markets()
+        await self._ensure_markets_async()
         market = self.market(symbol)
         request = {"symbol": market["id"]}
         response = await self._request_async(self.endpoints.publicGetFapiV1Ticker24hr, self.extend(request, params or {}))
         return self.parse_ticker(response, market)
 
     async def fetch_balance_async(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        self.load_markets()
         response = await self._request_async(self.endpoints.privateGetFapiV2Balance, params or {})
         return self.parse_balance(response)
 
     async def fetch_positions_async(self, symbols: Optional[List[str]] = None, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        self.load_markets()
+        await self._ensure_markets_async()
         response = await self._request_async(self.endpoints.privateGetFapiV2PositionRisk, params or {})
-        positions = self.parse_positions(response, symbols)
-        return self.filter_by_array(positions, 'symbol', symbols, False)
+        return self.parse_positions(response, symbols)
 
     async def create_order_async(
         self, symbol: str, type: str, side: str, amount: float,
         price: Optional[float] = None, params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        params = params or {}
-        self.load_markets()
+        await self._ensure_markets_async()
         market = self.market(symbol)
-        request: Dict[str, Any] = {
-            "symbol": market["id"],
-            "side": side.upper(),
-            "type": type.upper(),
-        }
-        if type.lower() != "market":
-            request["price"] = self.price_to_precision(symbol, price)
-            time_in_force = self.safe_string(params, "timeInForce", "GTC")
-            request["timeInForce"] = time_in_force
-            params = self.omit(params, "timeInForce")
-        if amount is not None:
-            request["quantity"] = self.amount_to_precision(symbol, amount)
-        client_order_id = self.safe_string(params, "clientOrderId")
-        if client_order_id:
-            request["newClientOrderId"] = client_order_id
-            params = self.omit(params, "clientOrderId")
-        reduce_only = self.safe_value(params, "reduceOnly")
-        if reduce_only is not None:
-            request["reduceOnly"] = reduce_only
-            params = self.omit(params, "reduceOnly")
-        response = await self._request_async(self.endpoints.privatePostFapiV1Order, self.extend(request, params))
+        request = self._order_request(market, type, side, amount, price, params or {})
+        response = await self._request_async(self.endpoints.privatePostFapiV1Order, request)
         return self.parse_order(response, market)
+
+    async def _ensure_markets_async(self) -> None:
+        if not self.markets:
+            response = await self._request_async(self.endpoints.publicGetFapiV1ExchangeInfo)
+            if not self.markets:
+                self.set_markets(self._parse_exchange_info(response))
+        elif not self.markets_by_id:
+            self.set_markets(self.markets)
 
     async def cancel_order_async(
         self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None
@@ -840,7 +852,7 @@ class aster(Exchange):
         params = params or {}
         if symbol is None:
             raise ArgumentsRequired(self.id + " cancel_order_async() requires a symbol argument")
-        self.load_markets()
+        await self._ensure_markets_async()
         market = self.market(symbol)
         request: Dict[str, Any] = {"symbol": market["id"], "orderId": id}
         response = await self._request_async(self.endpoints.privateDeleteFapiV1Order, self.extend(request, params))
@@ -852,7 +864,7 @@ class aster(Exchange):
         params = params or {}
         if symbol is None:
             raise ArgumentsRequired(self.id + " cancel_all_orders_async() requires a symbol argument")
-        self.load_markets()
+        await self._ensure_markets_async()
         market = self.market(symbol)
         request: Dict[str, Any] = {"symbol": market["id"]}
         return await self._request_async(self.endpoints.privateDeleteFapiV1AllOpenOrders, self.extend(request, params))
@@ -861,7 +873,7 @@ class aster(Exchange):
         params = params or {}
         if symbol is None:
             raise ArgumentsRequired(self.id + " fetch_order_async() requires a symbol argument")
-        self.load_markets()
+        await self._ensure_markets_async()
         market = self.market(symbol)
         request = {"symbol": market["id"], "orderId": id}
         response = await self._request_async(self.endpoints.privateGetFapiV1Order, self.extend(request, params))
@@ -872,7 +884,7 @@ class aster(Exchange):
         limit: Optional[int] = None, params: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         params = params or {}
-        self.load_markets()
+        await self._ensure_markets_async()
         request: Dict[str, Any] = {}
         market = None
         if symbol is not None:

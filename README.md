@@ -62,7 +62,7 @@ exchange.cancel_order(order['id'], 'ETH/USDC')
 
 | Exchange | Type | Auth | Market Data | Trading |
 |---|---|---|:---:|:---:|
-| **Aster** | Futures DEX | HMAC-SHA256 | REST, WS | REST |
+| **Aster** | Futures DEX | EIP-712 (V3), HMAC-SHA256 (V1) | REST, WS | REST |
 | **Backpack** | Spot / Perps | Ed25519 | REST, WS | REST |
 | **Binance** | Spot | HMAC-SHA256 | REST, WS | REST |
 | **Lighter** | DEX | zkSync signer | REST, WS | REST |

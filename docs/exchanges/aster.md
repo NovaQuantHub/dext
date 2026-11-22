@@ -5,7 +5,7 @@
 Aster is a Binance-style futures DEX with full WebSocket support for market data and user streams.
 
 **Key Characteristics:**
-- **Authentication:** HMAC-SHA256 signatures
+- **Authentication** uses EIP-712 for V3 agent wallets. Existing V1 keys use HMAC-SHA256.
 - **Symbol Format:** Lowercase (e.g., `xauusdt`, `btcusdt`)
 - **WebSocket Protocol:** Binance-compatible streams
 - **API Base URL:** `https://fapi.asterdex.com`
@@ -16,28 +16,7 @@ Aster is a Binance-style futures DEX with full WebSocket support for market data
 
 ## Authentication
 
-Aster uses **HMAC-SHA256 signatures** similar to Binance Futures.
-
-### Implementation
-
-Located in `exchanges/auth/aster.py`:
-
-```python
-from exchanges.auth.aster import sign_request
-
-params = {
-    "symbol": "XAUUSDT",
-    "side": "BUY",
-    "quantity": "0.1",
-    "timestamp": 1768490299726
-}
-signature = sign_request(params, secret_key)
-```
-
-### Requirements
-- HMAC-SHA256 signature of sorted query string
-- Timestamp parameter required (13-digit milliseconds)
-- Signature appended to request parameters
+Register an agent wallet with Aster and supply its private key as `privateKey`. Set `options.user` when the request needs to identify the parent account. The V3 client signs the encoded request with a microsecond nonce. Existing V1 credentials still work with `apiKey` and `secret`. See the [official Aster API documentation](https://github.com/asterdex/api-docs).
 
 ---
 
@@ -49,8 +28,8 @@ signature = sign_request(params, secret_key)
 from exchanges import get_client
 
 client = get_client("aster", {
-    "apiKey": "your_api_key",
-    "secret": "your_secret"
+    "privateKey": "your_agent_wallet_private_key",
+    "options": {"user": "your_account_wallet_address"},
 })
 
 # Fetch ticker
@@ -162,16 +141,18 @@ wss://fstream.asterdex.com/stream?streams=xauusdt@depth20
 from exchanges.ws import AsterUserWS
 
 ws = AsterUserWS(
-    api_key="your_api_key",
+    private_key="your_agent_wallet_private_key",
+    user="your_account_wallet_address",
     on_event=on_event
 )
 await ws.run_forever()
 ```
 
-**Authentication Flow:**
-1. POST to `/fapi/v1/listenKey` to get listen key
+The V3 client follows this authentication flow.
+
+1. Sign and send `POST /fapi/v3/listenKey` to get the listen key
 2. Connect to `wss://fstream.asterdex.com/ws/<listenKey>`
-3. Keep-alive every 30 minutes (PUT `/fapi/v1/listenKey`)
+3. Sign and send `PUT /fapi/v3/listenKey` every 30 minutes
 
 **Supported Events:**
 - `ORDER_TRADE_UPDATE` - Order status changes
@@ -260,7 +241,7 @@ await ws.run_forever()
 
 ## Integration Checklist
 
-- [ ] Configure HMAC-SHA256 authentication
+- [ ] Configure V3 agent-wallet authentication or existing V1 credentials
 - [ ] Verify symbol format (lowercase)
 - [ ] Choose appropriate WebSocket client type
 - [ ] Implement listenKey management for user stream

@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
+from exchanges.auth.aster import sign_v3_request
 from exchanges.base.utils import async_with_timeout
 from exchanges.proxy_utils import get_proxy_config
 from exchanges.logger import setup_logger
@@ -298,56 +299,33 @@ class AsterBookTickerWS(WebsocketClient):
 # ============================================================
 
 class AsterUserWS(WebsocketClient):
-    """Aster user data stream
-
-    Subscribes to private data including account orders, positions, and balances.
-
-    Features:
-    - Requires API Key authentication
-    - Real-time push of account changes
-    - Automatic keepalive (renewed every 30 minutes)
-
-    Authentication flow:
-        1. Create a listenKey using the API Key
-        2. Connect to WebSocket using the listenKey
-        3. Auto-renew every 30 minutes
-
-    WebSocket URL:
-        wss://fstream.asterdex.com/ws/<listenKey>
-
-    Usage example:
-        ws = AsterUserWS(api_key='your_key', on_event=on_event)
-        await ws.run_forever()
-    """
+    """Futures account stream with a V3 agent wallet or existing V1 API key."""
 
     def __init__(
         self,
-        api_key: str,
-        on_event,
+        api_key: Optional[str] = None,
+        on_event=None,
         *,
+        private_key: Optional[str] = None,
+        user: Optional[str] = None,
         rest_base: str = "https://fapi.asterdex.com",
         ws_base: str = "wss://fstream.asterdex.com",
         keepalive_interval: float = 30 * 60,
         proxies: Optional[Dict[str, str]] = None,
         reconnect_delay: float = 3.0,
     ) -> None:
-        """Initialize the user data stream client
-
-        Args:
-            api_key: Aster API Key
-            on_event: Event handler callback function
-            rest_base: REST API base URL
-            ws_base: WebSocket base URL
-            keepalive_interval: listenKey keepalive interval in seconds (default 30 minutes)
-            proxies: Proxy configuration; None uses environment variables
-            reconnect_delay: Reconnection delay in seconds
-        """
-        self.api_key = api_key
+        if not private_key and not api_key:
+            raise ValueError("Aster user stream requires a V3 agent private key or an existing V1 API key")
+        if on_event is None:
+            raise ValueError("Aster user stream requires an event handler")
+        self.private_key = private_key
+        self.user = user
         self.rest_base = rest_base.rstrip("/")
         self.ws_base = ws_base.rstrip("/")
         self.keepalive_interval = keepalive_interval
         self.session = requests.Session()
-        self.session.headers.update({"X-MBX-APIKEY": api_key})
+        if not private_key:
+            self.session.headers.update({"X-MBX-APIKEY": api_key})
         proxy_config = proxies if proxies is not None else get_proxy_config()
         if proxy_config:
             self.session.proxies.update(proxy_config)
@@ -355,25 +333,27 @@ class AsterUserWS(WebsocketClient):
         self._listen_key: Optional[str] = None
         self._keepalive_task: Optional[asyncio.Task] = None
 
-        super().__init__(name="aster-user", stream_url="", on_event=on_event, reconnect_delay=reconnect_delay)
+        super().__init__(name="aster-user", stream_url="", on_event=on_event, reconnect_delay=reconnect_delay, log_url=False)
 
-    # ---- REST helpers ----
-    def _create_listen_key(self) -> str:
-        """Create a listenKey"""
-        url = f"{self.rest_base}/fapi/v1/listenKey"
-        resp = self.session.post(url, timeout=10)
+    def _listen_key_request(self, method: str, listen_key: Optional[str] = None) -> Dict[str, Any]:
+        if self.private_key:
+            body = sign_v3_request({}, self.private_key, self.user)
+            resp = self.session.request(method, f"{self.rest_base}/fapi/v3/listenKey", data=body,
+                                        headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=10)
+        else:
+            params = {"listenKey": listen_key} if listen_key is not None else None
+            resp = self.session.request(method, f"{self.rest_base}/fapi/v1/listenKey", params=params, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        listen_key = data.get("listenKey")
+        return resp.json() if resp.content else {}
+
+    def _create_listen_key(self) -> str:
+        listen_key = self._listen_key_request("POST").get("listenKey")
         if not listen_key:
             raise RuntimeError("Missing listenKey field")
         return listen_key
 
     def _keepalive_listen_key(self, listen_key: str) -> None:
-        """Renew the listenKey"""
-        url = f"{self.rest_base}/fapi/v1/listenKey"
-        resp = self.session.put(url, params={"listenKey": listen_key}, timeout=10)
-        resp.raise_for_status()
+        self._listen_key_request("PUT", listen_key)
 
     # ---- Hooks into base lifecycle ----
     async def get_stream_url(self) -> str:
@@ -387,8 +367,7 @@ class AsterUserWS(WebsocketClient):
             logger.error("[aster-user] no listenKey available, user stream will not receive keepalive")
             return
         # Start listenKey keepalive
-        self._keepalive_task = asyncio.create_task(self._keepalive_loop(self._listen_key))
-        logger.info(f"[aster-user] connected with listenKey: {self._listen_key[:8]}...")
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop(self._listen_key, ws))
 
     async def on_disconnect(self) -> None:
         """Clean up keepalive task after disconnection"""
@@ -400,15 +379,17 @@ class AsterUserWS(WebsocketClient):
                 pass
         self._keepalive_task = None
 
-    async def _keepalive_loop(self, listen_key: str) -> None:
+    async def _keepalive_loop(self, listen_key: str, ws) -> None:
         """listenKey keepalive loop"""
         while True:
             await asyncio.sleep(self.keepalive_interval)
             try:
                 await async_with_timeout(self._keepalive_listen_key, listen_key, timeout_sec=10)
                 logger.debug("[aster-user] listenKey keepalive ok")
-            except Exception as exc:  # noqa
-                logger.warning(f"[aster-user] listenKey keepalive failed: {exc}")
+            except Exception as exc:
+                logger.warning("[aster-user] listenKey keepalive failed (%s), reconnecting", type(exc).__name__)
+                await ws.close()
+                return
 
     # ---- WS handlers ----
     async def subscribe(self, ws) -> None:
@@ -462,3 +443,5 @@ class AsterUserWS(WebsocketClient):
             base_event.update({"type": "expired"})
 
         await self.on_event(base_event)
+        if event_type == "listenKeyExpired":
+            raise ConnectionError("Aster user stream listenKey expired")

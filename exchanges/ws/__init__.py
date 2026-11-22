@@ -121,8 +121,6 @@ def get_user_ws_client(name: str, on_event: Callable[[Dict[str, Any]], Any], **k
 
     if name == "aster":
         api_key = kwargs.pop("api_key", None)
-        if not api_key:
-            raise ValueError("Aster user stream requires api_key")
         return AsterUserWS(api_key=api_key, on_event=on_event, **kwargs)
 
     if name == "binance":
