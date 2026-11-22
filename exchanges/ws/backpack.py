@@ -45,6 +45,13 @@ def _parse_book_ticker(data: dict) -> Optional[Tuple[float, float, float, float]
     return bid_price, bid_qty_f, ask_price, ask_qty_f
 
 
+def _timestamp_ms(timestamp: Any) -> Optional[int]:
+    if timestamp is None:
+        return None
+    value = int(timestamp)
+    return value // 1000 if value >= 100_000_000_000_000 else value
+
+
 class BackpackWS(WebsocketClient):
     """Backpack WS market data client."""
 
@@ -83,7 +90,7 @@ class BackpackWS(WebsocketClient):
                 "exchange": "backpack",
                 "symbol": symbol,
                 "stream": "bbo",
-                "ts_exchange": data.get("T") or data.get("E") or None,
+                "ts_exchange": _timestamp_ms(data.get("T", data.get("E"))),
                 "ts_local": ts_local_ms,
                 "bids": [[bid_price, bid_qty]],
                 "asks": [[ask_price, ask_qty]],
@@ -101,7 +108,7 @@ class BackpackWS(WebsocketClient):
                 "exchange": "backpack",
                 "symbol": symbol,
                 "stream": "l2",
-                "ts_exchange": data.get("T") or data.get("E") or None,
+                "ts_exchange": _timestamp_ms(data.get("T", data.get("E"))),
                 "ts_local": ts_local_ms,
                 "bids": _parse_levels(data.get("b", [])),
                 "asks": _parse_levels(data.get("a", [])),
@@ -143,10 +150,9 @@ class BackpackUserWS(WebsocketClient):
     async def subscribe(self, ws) -> None:
         timestamp = int(time.time() * 1000)
         verifying_key, signature = self._create_signature("subscribe", timestamp, self.window)
-        params = ["account.orderUpdate", "account.fillUpdate"]
         sub = {
             "method": "SUBSCRIBE",
-            "params": params,
+            "params": ["account.orderUpdate"],
             "signature": [verifying_key, signature, str(timestamp), str(self.window)],
         }
         await ws.send(json.dumps(sub))
@@ -158,7 +164,7 @@ class BackpackUserWS(WebsocketClient):
             return
 
         data = msg.get("data") or {}
-        if stream == "account.orderUpdate":
+        if stream == "account.orderUpdate" or stream.startswith("account.orderUpdate."):
             event = self._parse_order_update(data, ts_local_ms)
             await self.on_event(event)
             return
@@ -169,26 +175,35 @@ class BackpackUserWS(WebsocketClient):
             return
 
     def _parse_order_update(self, data: dict, ts_local_ms: int) -> Dict[str, Any]:
+        order_id = data.get("i", data.get("orderId"))
+        trade_id = data.get("t")
+        is_fill = data.get("e") == "orderFill"
         return {
             "exchange": "backpack",
             "stream": "user",
-            "event_type": "ORDER_UPDATE",
-            "type": "order",
-            "ts_exchange": data.get("eventTime") or data.get("E") or None,
+            "event_type": "FILL_UPDATE" if is_fill else "ORDER_UPDATE",
+            "type": "trade" if is_fill else "order",
+            "ts_exchange": _timestamp_ms(data.get("E", data.get("eventTime"))),
             "ts_local": ts_local_ms,
-            "symbol": data.get("symbol"),
-            "order_id": str(data.get("orderId")) if data.get("orderId") is not None else None,
-            "client_order_id": data.get("clientOrderId"),
-            "side": data.get("side"),
-            "order_type": data.get("orderType"),
-            "status": data.get("status"),
-            "time_in_force": data.get("timeInForce"),
-            "orig_qty": data.get("quantity"),
-            "filled_qty": data.get("executedQuantity"),
-            "price": data.get("price"),
-            "trigger_price": data.get("triggerPrice"),
-            "post_only": data.get("postOnly"),
-            "self_trade_prevention": data.get("selfTradePrevention"),
+            "symbol": data.get("s", data.get("symbol")),
+            "order_id": str(order_id) if order_id is not None else None,
+            "client_order_id": data.get("c", data.get("clientOrderId")),
+            "side": data.get("S", data.get("side")),
+            "order_type": data.get("o", data.get("orderType")),
+            "status": data.get("X", data.get("status")),
+            "time_in_force": data.get("f", data.get("timeInForce")),
+            "orig_qty": data.get("q", data.get("quantity")),
+            "filled_qty": data.get("z", data.get("executedQuantity")),
+            "price": data.get("p", data.get("price")),
+            "trigger_price": data.get("P", data.get("triggerPrice")),
+            "post_only": data.get("y", data.get("postOnly")),
+            "self_trade_prevention": data.get("V", data.get("selfTradePrevention")),
+            "trade_id": str(trade_id) if trade_id is not None else None,
+            "last_price": data.get("L"),
+            "last_qty": data.get("l"),
+            "fee": data.get("n"),
+            "fee_asset": data.get("N"),
+            "is_maker": data.get("m"),
             "raw": data,
         }
 
@@ -198,7 +213,7 @@ class BackpackUserWS(WebsocketClient):
             "stream": "user",
             "event_type": "FILL_UPDATE",
             "type": "trade",
-            "ts_exchange": data.get("eventTime") or data.get("E") or None,
+            "ts_exchange": _timestamp_ms(data.get("E", data.get("eventTime"))),
             "ts_local": ts_local_ms,
             "symbol": data.get("symbol"),
             "trade_id": str(data.get("tradeId")) if data.get("tradeId") is not None else None,

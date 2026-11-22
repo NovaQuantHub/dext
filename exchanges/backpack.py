@@ -753,6 +753,8 @@ class backpack(Exchange):
                 'amount': amountPrecision,
                 'price': pricePrecision,
             },
+            'stepSize': amountPrecision,
+            'tickSize': pricePrecision,
             'limits': {
                 'leverage': {
                     'min': None,
@@ -881,15 +883,21 @@ class backpack(Exchange):
         https://docs.backpack.exchange/#tag/Markets/operation/get_depth
 
         :param str symbol: unified symbol of the market to fetch the order book for
-        :param int [limit]: the maximum amount of order book entries to return(default 100, max 200)
-        :param dict [params]: extra parameters specific to the bitteam api endpoint
+        :param int [limit]: the maximum number of price levels to return on each side
+        :param dict [params]: extra parameters for the Backpack depth endpoint
         :returns dict: A dictionary of standardized order book structures indexed by market symbols
         """
+        if limit is not None and limit < 0:
+            raise BadRequest(self.id + ' fetch_order_book() requires a non-negative limit')
         self.load_markets()
         market = self.market(symbol)
         request: dict = {
             'symbol': market['id'],
         }
+        if limit is not None:
+            depth = next((value for value in (5, 10, 20, 50, 100, 500, 1000) if value >= limit), None)
+            if depth is not None:
+                request['limit'] = depth
         response = self._request(self.endpoints.publicGetApiV1Depth, self.extend(request, params))
         #
         #     {
@@ -908,6 +916,9 @@ class backpack(Exchange):
         microseconds = self.safe_integer(response, 'timestamp')
         timestamp = self.parse_to_int(microseconds / 1000)
         orderbook = self.parse_order_book(response, symbol, timestamp)
+        if limit is not None:
+            orderbook['bids'] = orderbook['bids'][:limit]
+            orderbook['asks'] = orderbook['asks'][:limit]
         orderbook['nonce'] = self.safe_integer(response, 'lastUpdateId')
         return orderbook
 

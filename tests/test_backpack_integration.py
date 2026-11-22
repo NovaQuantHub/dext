@@ -1,14 +1,38 @@
 """Test Backpack WS integration with unified architecture."""
 import asyncio
+import base64
 import json
 from decimal import Decimal
 
 import pytest
 
+from exchanges.backpack import backpack
 from exchanges.ws.dispatcher import create_dispatcher
 from exchanges.ws.backpack import BackpackWS, BackpackUserWS
 from exchanges.ws.types import EventType, OrderStatus, OrderSide
 from conftest import MockWebsocket
+
+
+def test_backpack_depth_limit(monkeypatch):
+    client = backpack()
+    monkeypatch.setattr(client, "load_markets", lambda: None)
+    monkeypatch.setattr(client, "market", lambda symbol: {"id": "BTC_USDC"})
+
+    def request(endpoint, params):
+        assert endpoint is client.endpoints.publicGetApiV1Depth
+        assert params == {"symbol": "BTC_USDC", "limit": 5}
+        return {
+            "timestamp": 1753102447307501,
+            "lastUpdateId": "123",
+            "bids": [["98", "1"], ["99", "2"], ["100", "3"]],
+            "asks": [["103", "1"], ["102", "2"], ["101", "3"]],
+        }
+
+    monkeypatch.setattr(client, "_request", request)
+    book = client.fetch_order_book("BTC/USDC", limit=2)
+    assert book["bids"] == [[100.0, 3.0], [99.0, 2.0]]
+    assert book["asks"] == [[101.0, 3.0], [102.0, 2.0]]
+    assert book["nonce"] == 123
 
 
 @pytest.mark.asyncio
@@ -221,6 +245,37 @@ async def test_backpack_user_order_update():
     assert normalized.data.filled == Decimal("10.0")
     assert normalized.data.remaining == Decimal("0.0")
     assert normalized.metadata.event_type == EventType.ORDER_UPDATE
+
+
+@pytest.mark.asyncio
+async def test_backpack_current_order_stream_fill():
+    dispatcher = create_dispatcher()
+    secret = base64.b64encode(b"1" * 32).decode()
+    client = BackpackUserWS("key", secret, dispatcher.on_raw_event)
+    socket = MockWebsocket()
+    await client.subscribe(socket)
+    assert json.loads(socket.sent_messages[0])["params"] == ["account.orderUpdate"]
+
+    frame = json.dumps({
+        "stream": "account.orderUpdate.SOL_USDC_PERP",
+        "data": {
+            "e": "orderFill", "E": 1705834567900123, "s": "SOL_USDC_PERP", "i": "123456",
+            "c": 0, "S": "Bid", "X": "PartiallyFilled", "q": "10", "p": "98.5",
+            "z": "4", "l": "2", "L": "98.25", "t": 123,
+        },
+    })
+    await client.handle_message(frame, ts_local_ms=1705834567905)
+    update = await asyncio.wait_for(dispatcher.get_order_update(), timeout=0.1)
+    assert update.symbol == "SOL/USDC:USDC"
+    assert update.metadata.ts_exchange == 1705834567900
+    assert update.metadata.latency_ms == 5
+    assert update.metadata.event_type == EventType.FILL_UPDATE
+    assert update.data.side == OrderSide.BUY
+    assert update.data.status == OrderStatus.PARTIALLY_FILLED
+    assert update.data.client_order_id == "0"
+    assert update.data.filled == Decimal("4")
+    assert update.data.filled_amount == Decimal("2")
+    assert update.data.fill_price == Decimal("98.25")
 
 
 @pytest.mark.asyncio

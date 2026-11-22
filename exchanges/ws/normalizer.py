@@ -263,6 +263,10 @@ class BackpackNormalizer(Normalizer):
 
     def normalize_symbol(self, raw_symbol: str, *, market_index: Optional[int] = None) -> str:
         symbol = raw_symbol or ""
+        if symbol.endswith("_PERP"):
+            base, separator, quote = symbol[:-5].rpartition("_")
+            if separator:
+                return f"{base}/{quote}:{quote}"
         if "_" in symbol and "/" not in symbol:
             return symbol.replace("_", "/")
         return symbol or "UNKNOWN"
@@ -328,7 +332,7 @@ class BackpackNormalizer(Normalizer):
 
         status = self.normalize_order_status(raw_event.get("status", "new"))
         side_raw = str(raw_event.get("side", "")).lower()
-        side = OrderSide.BUY if side_raw == "buy" else OrderSide.SELL
+        side = OrderSide.BUY if side_raw in ("buy", "bid") else OrderSide.SELL
 
         amount = self.to_decimal(raw_event.get("orig_qty")) or Decimal(0)
         filled = self.to_decimal(raw_event.get("filled_qty")) or Decimal(0)
@@ -340,6 +344,7 @@ class BackpackNormalizer(Normalizer):
 
         fill_price = self.to_decimal(raw_event.get("last_price"))
         filled_amount = self.to_decimal(raw_event.get("last_qty"))
+        client_order_id = raw_event.get("client_order_id")
 
         symbol = self.normalize_symbol(raw_event.get("symbol", ""))
         ts_local = int(raw_event.get("ts_local") or self.now_ms())
@@ -351,7 +356,7 @@ class BackpackNormalizer(Normalizer):
             symbol=symbol,
             data=OrderData(
                 order_id=str(order_id),
-                client_order_id=raw_event.get("client_order_id"),
+                client_order_id=str(client_order_id) if client_order_id is not None else None,
                 status=status,
                 side=side,
                 price=self.to_decimal(raw_event.get("price")),
