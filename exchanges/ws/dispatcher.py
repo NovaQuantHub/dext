@@ -84,7 +84,7 @@ class WSDispatcher:
         stream = (raw_event.get("stream") or "").lower()
 
         try:
-            if stream in ("orderbook", "bbo", "l2", "rfq_quote"):
+            if stream in ("orderbook", "bbo", "l2", "rfq_quote", "bookticker"):
                 self.stats["market_data_received"] += 1
                 normalized = normalizer.normalize_bbo(raw_event)
                 if normalized and self._should_process(normalized.exchange, normalized.symbol):

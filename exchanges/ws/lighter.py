@@ -55,7 +55,7 @@ class LighterWS(WebsocketClient):
         self.snapshot_loaded = False
         self.order_book_offset: Optional[int] = None
         self.order_book_sequence_gap = False
-        self.order_book_lock = asyncio.Lock()
+        self._order_book_lock: Optional[asyncio.Lock] = None
         self.ws = None
         self.max_offset_skip = 5
         self._last_refresh_ts: float = 0.0
@@ -72,6 +72,12 @@ class LighterWS(WebsocketClient):
             on_event=on_event,
             reconnect_delay=reconnect_delay,
         )
+
+    @property
+    def order_book_lock(self) -> asyncio.Lock:
+        if self._order_book_lock is None:
+            self._order_book_lock = asyncio.Lock()
+        return self._order_book_lock
 
     def _clear_order_book_state(self) -> None:
         self.order_book["bids"].clear()

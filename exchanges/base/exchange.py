@@ -471,6 +471,11 @@ class Exchange(object):
                 return gzip.GzipFile('', 'rb', 9, io.BytesIO(text)).read()
         return text
 
+    @staticmethod
+    def _request_headers_for_log(headers):
+        secret_headers = {'authorization', 'proxy-authorization', 'cookie', 'x-api-key', 'x-mbx-apikey', 'x-signature'}
+        return {key: '<redacted>' if key.lower() in secret_headers else value for key, value in headers.items()}
+
     def prepare_request_headers(self, headers=None):
         headers = headers or {}
         if self.session:
@@ -532,8 +537,9 @@ class Exchange(object):
             proxies = self.proxies
         # log
         if self.verbose:
-            self.log("\nfetch Request:", self.id, method, url, "RequestHeaders:", request_headers, "RequestBody:", body)
-        self.logger.debug("%s %s, Request: %s %s", method, url, request_headers, body)
+            self.log("\nfetch Request:", self.id, method, url, "RequestHeaders:", self._request_headers_for_log(request_headers), "RequestBody:", body)
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug("%s %s, Request: %s %s", method, url, self._request_headers_for_log(request_headers), body)
         # end of proxies & headers
 
         request_body = body
@@ -1711,7 +1717,7 @@ class Exchange(object):
                 'createDepositAddress': None,
                 'createLimitBuyOrder': None,
                 'createLimitBuyOrderWs': None,
-                'createLimitOrder': True,
+                'createLimitOrder': False,
                 'createLimitOrderWs': None,
                 'createLimitSellOrder': None,
                 'createLimitSellOrderWs': None,
@@ -1719,8 +1725,8 @@ class Exchange(object):
                 'createMarketBuyOrderWs': None,
                 'createMarketBuyOrderWithCost': None,
                 'createMarketBuyOrderWithCostWs': None,
-                'createMarketOrder': True,
-                'createMarketOrderWs': True,
+                'createMarketOrder': False,
+                'createMarketOrderWs': False,
                 'createMarketOrderWithCost': None,
                 'createMarketOrderWithCostWs': None,
                 'createMarketSellOrder': None,
@@ -1753,7 +1759,7 @@ class Exchange(object):
                 'createTriggerOrder': None,
                 'createTriggerOrderWs': None,
                 'deposit': None,
-                'editOrder': 'emulated',
+                'editOrder': False,
                 'editOrderWithClientOrderId': None,
                 'editOrders': None,
                 'editOrderWs': None,
@@ -1779,7 +1785,7 @@ class Exchange(object):
                 'fetchCrossBorrowRate': None,
                 'fetchCrossBorrowRates': None,
                 'fetchCurrencies': 'emulated',
-                'fetchCurrenciesWs': 'emulated',
+                'fetchCurrenciesWs': False,
                 'fetchDeposit': None,
                 'fetchDepositAddress': None,
                 'fetchDepositAddresses': None,
@@ -4501,39 +4507,41 @@ class Exchange(object):
                 params = self.omit(params, 'tag')
         return [tag, params]
 
+    def _market_precision(self, market, field, increment_field):
+        precision = market['precision'][field]
+        if self.precisionMode == TICK_SIZE:
+            increment = self.safe_number(market, increment_field)
+            if increment is not None and increment > 0:
+                return increment
+            if isinstance(precision, (int, float)) and precision >= 1:
+                return 10 ** (-int(precision))
+        return precision
+
     def cost_to_precision(self, symbol: str, cost):
         if cost is None:
             return None
         market = self.market(symbol)
-        precision = market['precision']['price']
-        if self.precisionMode == TICK_SIZE and isinstance(precision, (int, float)) and precision >= 1:
-            precision = 10 ** (-int(precision))
+        precision = self._market_precision(market, 'price', 'tickSize')
         return self.decimal_to_precision(cost, TRUNCATE, precision, self.precisionMode, self.paddingMode)
 
     def price_to_precision(self, symbol: str, price):
         if price is None:
             return None
         market = self.market(symbol)
-        precision = market['precision']['price']
-        if self.precisionMode == TICK_SIZE and isinstance(precision, (int, float)) and precision >= 1:
-            precision = 10 ** (-int(precision))
+        precision = self._market_precision(market, 'price', 'tickSize')
         result = self.decimal_to_precision(price, ROUND, precision, self.precisionMode, self.paddingMode)
         if result == '0':
-            raise InvalidOrder(self.id + ' price of ' + market['symbol'] + ' must be greater than minimum price precision of ' + self.number_to_string(market['precision']['price']))
+            raise InvalidOrder(self.id + ' price of ' + market['symbol'] + ' must be greater than minimum price precision of ' + self.number_to_string(precision))
         return result
 
     def amount_to_precision(self, symbol: str, amount):
         if amount is None:
             return None
         market = self.market(symbol)
-        precision = market['precision']['amount']
-        if self.precisionMode == TICK_SIZE and isinstance(precision, (int, float)) and precision >= 1:
-            # precision is stored as decimal places count (e.g. 3) but TICK_SIZE mode
-            # expects actual tick value (e.g. 0.001). Convert integer to tick size.
-            precision = 10 ** (-int(precision))
+        precision = self._market_precision(market, 'amount', 'stepSize')
         result = self.decimal_to_precision(amount, TRUNCATE, precision, self.precisionMode, self.paddingMode)
         if result == '0':
-            raise InvalidOrder(self.id + ' amount of ' + market['symbol'] + ' must be greater than minimum amount precision of ' + self.number_to_string(market['precision']['amount']))
+            raise InvalidOrder(self.id + ' amount of ' + market['symbol'] + ' must be greater than minimum amount precision of ' + self.number_to_string(precision))
         return result
 
     def fee_to_precision(self, symbol: str, fee):
@@ -5420,8 +5428,9 @@ class Exchange(object):
         request_headers = self.prepare_request_headers(headers)
 
         if self.verbose:
-            self.log("\nfetch_async Request:", self.id, method, url, "RequestHeaders:", request_headers, "RequestBody:", body)
-        self.logger.debug("%s %s, Request: %s %s", method, url, request_headers, body)
+            self.log("\nfetch_async Request:", self.id, method, url, "RequestHeaders:", self._request_headers_for_log(request_headers), "RequestBody:", body)
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug("%s %s, Request: %s %s", method, url, self._request_headers_for_log(request_headers), body)
 
         client = await self._get_async_client()
 

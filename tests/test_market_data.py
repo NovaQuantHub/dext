@@ -1,5 +1,7 @@
 """Tests for MarketDataManager – price snapshots, position tracking, listeners."""
 
+from __future__ import annotations
+
 import asyncio
 import time
 

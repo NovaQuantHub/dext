@@ -683,11 +683,6 @@ class VariationalNormalizer(Normalizer):
             symbol = self.normalize_symbol(raw_event.get("symbol", ""))
 
         ts_local = int(raw_event.get("ts_local") or self.now_ms())
-        latency_ms = raw_event.get("latency_ms") or 0
-        try:
-            latency_ms = int(latency_ms)
-        except (TypeError, ValueError):
-            latency_ms = 0
         _raw_ts = raw_event.get("ts_exchange")
         ts_exchange = int(_raw_ts) if _raw_ts is not None else None
 

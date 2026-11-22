@@ -1,4 +1,5 @@
 PyNaCl
+cryptography
 requests
 httpx
 curl_cffi

@@ -815,6 +815,7 @@ class TestVariationalNormalizeBbo:
         assert result.data.bid_size == Decimal(0)
         assert result.data.ask_size == Decimal(0)
         assert result.metadata.event_type == EventType.BBO_UPDATE
+        assert result.metadata.ts_exchange == 1699999999900
 
     def test_symbol_fallback_when_no_instrument(self, variational):
         raw = {
@@ -832,7 +833,7 @@ class TestVariationalNormalizeBbo:
     def test_missing_ask_returns_none(self, variational):
         assert variational.normalize_bbo({"bid": "100"}) is None
 
-    def test_latency_ms_used(self, variational):
+    def test_latency_does_not_replace_exchange_timestamp(self, variational):
         raw = {
             "bid": "100",
             "ask": "101",
@@ -840,7 +841,8 @@ class TestVariationalNormalizeBbo:
             "latency_ms": 50,
         }
         result = variational.normalize_bbo(raw)
-        assert result.metadata.ts_exchange == 1700000000000 - 50
+        assert result.metadata.ts_exchange is None
+        assert result.metadata.latency_ms is None
 
     def test_last_price_included(self, variational):
         raw = {

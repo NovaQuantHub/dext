@@ -28,6 +28,7 @@ class WebsocketClient:
         reconnect_delay: float = 3.0,
         warn_on_no_message_after: float = 5.0,
         extra_headers: Optional[Dict[str, str]] = None,
+        log_url: bool = True,
     ) -> None:
         self.name = name
         self.stream_url = stream_url
@@ -35,7 +36,7 @@ class WebsocketClient:
         self.reconnect_delay = reconnect_delay
         self.warn_on_no_message_after = warn_on_no_message_after
         self.extra_headers = extra_headers
-        self._first_message = asyncio.Event()
+        self.log_url = log_url
 
     # ---- Hooks, subclasses may override ----
     async def subscribe(self, ws: WebSocketClientProtocol) -> None:
@@ -87,14 +88,15 @@ class WebsocketClient:
             async with connect(url, **connect_kwargs) as ws:
                 await self.on_connect(ws)
                 await self.subscribe(ws)
-                print(f"[{self.name}] connected -> {url}")
+                print(f"[{self.name}] connected" + (f" -> {url}" if self.log_url else ""))
+                first_message = asyncio.Event()
                 watchdog = None
                 if self.warn_on_no_message_after and self.warn_on_no_message_after > 0:
-                    watchdog = asyncio.create_task(self._wait_first_message(url))
+                    watchdog = asyncio.create_task(self._wait_first_message(first_message, url if self.log_url else ""))
                 try:
                     async for raw in ws:
                         ts_local_ms = int(time.time() * 1000)
-                        self._first_message.set()
+                        first_message.set()
                         await self.handle_message(raw, ts_local_ms)
                 finally:
                     if watchdog:
@@ -110,8 +112,9 @@ class WebsocketClient:
     def decode(raw: str) -> Dict[str, Any]:
         return json.loads(raw)
 
-    async def _wait_first_message(self, url: str) -> None:
+    async def _wait_first_message(self, first_message: asyncio.Event, url: str) -> None:
         try:
-            await asyncio.wait_for(self._first_message.wait(), timeout=self.warn_on_no_message_after)
+            await asyncio.wait_for(first_message.wait(), timeout=self.warn_on_no_message_after)
         except asyncio.TimeoutError:
-            print(f"[{self.name}] warning: no message received within {self.warn_on_no_message_after}s after connect (url={url})")
+            location = f" (url={url})" if url else ""
+            print(f"[{self.name}] warning: no message received within {self.warn_on_no_message_after}s after connect{location}")

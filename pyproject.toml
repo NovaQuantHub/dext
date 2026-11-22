@@ -12,7 +12,9 @@ license = {text = "MIT"}
 authors = [{name = "YuCry"}]
 dependencies = [
     "PyNaCl",
+    "cryptography",
     "requests",
+    "httpx",
     "curl_cffi",
     "python-dotenv",
     "websockets>=11.0",
